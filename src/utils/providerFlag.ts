@@ -63,15 +63,34 @@ export const VALID_PROVIDERS = buildValidProviders()
 export type ProviderFlagName = string
 
 /**
+ * Extract the value of a CLI flag from argv, supporting both forms:
+ *   --flag value
+ *   --flag=value
+ * Returns null if the flag is absent, has no value, or the value is empty.
+ */
+function parseFlagValue(args: string[], flag: string): string | null {
+  const eqPrefix = `${flag}=`
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === flag) {
+      const next = args[i + 1]
+      if (!next || next.startsWith('--')) return null
+      return next
+    }
+    if (arg && arg.startsWith(eqPrefix)) {
+      const value = arg.slice(eqPrefix.length)
+      return value.length > 0 ? value : null
+    }
+  }
+  return null
+}
+
+/**
  * Extract the value of --provider from argv.
  * Returns null if the flag is absent or has no value.
  */
 export function parseProviderFlag(args: string[]): string | null {
-  const idx = args.indexOf('--provider')
-  if (idx === -1) return null
-  const value = args[idx + 1]
-  if (!value || value.startsWith('--')) return null
-  return value
+  return parseFlagValue(args, '--provider')
 }
 
 /**
@@ -90,12 +109,8 @@ export function applyProviderFlagFromArgs(
  * Extract the value of --model from argv.
  * Returns null if absent.
  */
-function parseModelFlag(args: string[]): string | null {
-  const idx = args.indexOf('--model')
-  if (idx === -1) return null
-  const value = args[idx + 1]
-  if (!value || value.startsWith('--')) return null
-  return value
+export function parseModelFlag(args: string[]): string | null {
+  return parseFlagValue(args, '--model')
 }
 
 function getRouteDefaults(provider: string): {

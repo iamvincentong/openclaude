@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   parseProviderFlag,
+  parseModelFlag,
   applyProviderFlag,
   applyProviderFlagFromArgs,
   VALID_PROVIDERS,
@@ -387,5 +388,32 @@ describe('applyProviderFlagFromArgs', () => {
 
   test('returns undefined when --provider is absent', () => {
     expect(applyProviderFlagFromArgs(['--model', 'gpt-4o'])).toBeUndefined()
+  })
+})
+
+describe('parseProviderFlag — equals form', () => {
+  test('parses --provider=openai', () => {
+    expect(parseProviderFlag(['--provider=openai'])).toBe('openai')
+  })
+  test('parses --provider openai (existing)', () => {
+    expect(parseProviderFlag(['--provider', 'openai'])).toBe('openai')
+  })
+  test('returns null for --provider= (empty)', () => {
+    expect(parseProviderFlag(['--provider='])).toBeNull()
+  })
+  test('returns null when flag absent', () => {
+    expect(parseProviderFlag(['--something'])).toBeNull()
+  })
+})
+
+describe('parseModelFlag — equals form', () => {
+  test('parses --model=gemini-flash', () => {
+    expect(parseModelFlag(['--model=gemini-flash'])).toBe('gemini-flash')
+  })
+  test('parses --model gemini-flash (existing)', () => {
+    expect(parseModelFlag(['--model', 'gemini-flash'])).toBe('gemini-flash')
+  })
+  test('returns null for --model= (empty)', () => {
+    expect(parseModelFlag(['--model='])).toBeNull()
   })
 })
