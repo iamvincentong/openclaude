@@ -9,6 +9,7 @@ import {
   setOriginalCwd,
   switchSession,
 } from '../bootstrap/state.js'
+import { setLastUsedModel } from './providerProfiles.js'
 import { clearSystemPromptSections } from '../constants/systemPromptSections.js'
 import { restoreCostStateForSession } from '../cost-tracker.js'
 import type { AppState } from '../state/AppState.js'
@@ -235,7 +236,11 @@ export function restoreAgentFromSession(
     resumedAgent.model &&
     resumedAgent.model !== 'inherit'
   ) {
-    setMainLoopModelOverride(parseUserSpecifiedModel(resumedAgent.model))
+    const resumed = parseUserSpecifiedModel(resumedAgent.model)
+    setMainLoopModelOverride(resumed)
+    // Spec §4.5 write point #2: persist the resumed model so a
+    // subsequent plain 'openclaude' continues with this selection.
+    setLastUsedModel(resumed)
   }
 
   return { agentDefinition: resumedAgent, agentType: resumedAgent.agentType }
