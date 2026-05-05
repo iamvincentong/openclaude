@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { resetTestGlobalConfig } from './config.js'
 import type { GlobalConfig, ProviderProfile } from './config.js'
+import { setMainLoopModelOverride } from '../bootstrap/state.js'
 import {
   addAlias,
   addProviderProfile,
@@ -2076,5 +2077,24 @@ describe('setLastUsedModel', () => {
 
   test('no-ops silently when no active profile (does not throw)', () => {
     expect(() => setLastUsedModel('a/b')).not.toThrow()
+  })
+})
+
+describe('migration regression: setMainLoopModelOverride does NOT touch lastUsedModel', () => {
+  test('calling the setter directly leaves lastUsedModel unchanged', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+
+    // Simulate the migration call site at
+    // src/migrations/migrateSonnet1mToSonnet45.ts:46 which hardcodes this id.
+    setMainLoopModelOverride('sonnet-4-5-20250929[1m]')
+
+    const [profile] = getProviderProfiles()
+    expect(profile.lastUsedModel).toBeUndefined()
   })
 })
