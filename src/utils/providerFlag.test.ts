@@ -4,6 +4,7 @@ import {
   parseModelFlag,
   applyProviderFlag,
   applyProviderFlagFromArgs,
+  getModelEnvVarForProvider,
   VALID_PROVIDERS,
 } from './providerFlag.js'
 
@@ -415,5 +416,22 @@ describe('parseModelFlag — equals form', () => {
   })
   test('returns null for --model= (empty)', () => {
     expect(parseModelFlag(['--model='])).toBeNull()
+  })
+})
+
+describe('getModelEnvVarForProvider', () => {
+  test('routes openai-compatible providers to OPENAI_MODEL', () => {
+    for (const p of ['openai', 'github', 'ollama', 'nvidia-nim', 'bankr', 'xai', 'unknown-vendor']) {
+      expect(getModelEnvVarForProvider(p)).toBe('OPENAI_MODEL')
+    }
+  })
+  test('routes gemini and mistral to their own env vars', () => {
+    expect(getModelEnvVarForProvider('gemini')).toBe('GEMINI_MODEL')
+    expect(getModelEnvVarForProvider('mistral')).toBe('MISTRAL_MODEL')
+  })
+  test('returns null for anthropic / bedrock / vertex (model not driven by --model flag)', () => {
+    expect(getModelEnvVarForProvider('anthropic')).toBeNull()
+    expect(getModelEnvVarForProvider('bedrock')).toBeNull()
+    expect(getModelEnvVarForProvider('vertex')).toBeNull()
   })
 })

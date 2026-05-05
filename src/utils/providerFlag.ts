@@ -136,6 +136,30 @@ function getRouteDefaults(provider: string): {
 }
 
 /**
+ * Single source of truth: given a provider name, return the env var that
+ * holds the model id (if any). Used by both --model verbatim writes and
+ * alias resolution. Returns null for providers whose model is not driven
+ * by the --model flag (anthropic / bedrock / vertex use the saved
+ * profile's ANTHROPIC_MODEL or discovery instead).
+ */
+export function getModelEnvVarForProvider(provider: string): string | null {
+  switch (provider) {
+    case 'gemini':
+      return 'GEMINI_MODEL'
+    case 'mistral':
+      return 'MISTRAL_MODEL'
+    case 'anthropic':
+    case 'bedrock':
+    case 'vertex':
+      return null
+    // openai, github, ollama, nvidia-nim, bankr, xai, and any unknown
+    // OpenAI-compatible vendor route through OPENAI_MODEL.
+    default:
+      return 'OPENAI_MODEL'
+  }
+}
+
+/**
  * Apply a provider name to process.env.
  * Sets the required CLAUDE_CODE_USE_* flag and any provider-specific
  * defaults (Ollama base URL, model routing). Does NOT overwrite values
