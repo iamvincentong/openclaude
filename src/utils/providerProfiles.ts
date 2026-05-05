@@ -143,6 +143,10 @@ function resolveProfileCapabilityRouteId(
 
 const ALIAS_NAME_RE = /^[A-Za-z0-9._:-]+$/
 
+function isValidAliasName(name: string): boolean {
+  return ALIAS_NAME_RE.test(name) && !name.startsWith('--')
+}
+
 function sanitizeAliases(
   raw: unknown,
 ): Record<string, AliasEntry> | undefined {
@@ -151,7 +155,7 @@ function sanitizeAliases(
   }
   const out: Record<string, AliasEntry> = {}
   for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
-    if (!ALIAS_NAME_RE.test(name) || name.startsWith('--')) {
+    if (!isValidAliasName(name)) {
       continue
     }
     if (!entry || typeof entry !== 'object') {
@@ -1302,15 +1306,9 @@ export function clearActiveOpenAIModelOptionsCache(): void {
   })
 }
 
-const ALIAS_NAME_RE_EXPORT = /^[A-Za-z0-9._:-]+$/
-
 export type AliasMutationResult =
   | { ok: true; removed?: boolean }
   | { ok: false; error: string }
-
-function isValidAliasName(name: string): boolean {
-  return ALIAS_NAME_RE_EXPORT.test(name) && !name.startsWith('--')
-}
 
 export function addAlias(
   name: string,
