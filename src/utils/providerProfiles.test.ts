@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
+import { resetTestGlobalConfig } from './config.js'
 import type { ProviderProfile } from './config.js'
 
 async function importFreshProvidersModule() {
@@ -90,6 +91,7 @@ function saveMockGlobalConfig(
 }
 
 beforeEach(() => {
+  resetTestGlobalConfig()
   for (const key of RESTORED_KEYS) {
     delete process.env[key]
   }

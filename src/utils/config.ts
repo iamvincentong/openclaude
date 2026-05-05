@@ -933,6 +933,23 @@ export function saveGlobalConfig(
   }
 }
 
+/**
+ * Test-only: reset the in-memory global config back to defaults. Throws
+ * outside test mode so production code can never accidentally call it.
+ *
+ * Use in `beforeEach` of any test file that mutates global config via
+ * saveGlobalConfig / addProviderProfile / etc.
+ */
+export function resetTestGlobalConfig(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('resetTestGlobalConfig may only be called when NODE_ENV=test')
+  }
+  for (const key of Object.keys(TEST_GLOBAL_CONFIG_FOR_TESTING)) {
+    delete (TEST_GLOBAL_CONFIG_FOR_TESTING as Record<string, unknown>)[key]
+  }
+  Object.assign(TEST_GLOBAL_CONFIG_FOR_TESTING, createDefaultGlobalConfig())
+}
+
 // Cache for global config
 let globalConfigCache: { config: GlobalConfig | null; mtime: number } = {
   config: null,
