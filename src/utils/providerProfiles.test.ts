@@ -10,7 +10,9 @@ import {
   addAlias,
   addProviderProfile,
   getProviderProfiles,
+  listAliases,
   removeAlias,
+  resolveAliasOnActiveProfile,
 } from './providerProfiles.js'
 
 async function importFreshProvidersModule() {
@@ -1968,5 +1970,77 @@ describe('removeAlias', () => {
     const result = removeAlias('m')
     expect(result.ok).toBe(false)
     expect(result.error).toMatch(/no active provider profile/i)
+  })
+})
+
+describe('listAliases', () => {
+  test('returns alphabetized [name, modelId] pairs for the active profile', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    addAlias('opus-47', 'anthropic/claude-opus-4.7')
+    addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+    addAlias('alpha', 'a/b')
+
+    const result = listAliases()
+    expect(result.ok).toBe(true)
+    expect(result.entries).toEqual([
+      { name: 'alpha', model: 'a/b' },
+      { name: 'gemini-flash', model: 'google/gemini-3-flash-preview' },
+      { name: 'opus-47', model: 'anthropic/claude-opus-4.7' },
+    ])
+  })
+
+  test('returns empty list when no aliases are defined', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    const result = listAliases()
+    expect(result.ok).toBe(true)
+    expect(result.entries).toEqual([])
+  })
+
+  test('returns error when no active profile', () => {
+    const result = listAliases()
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/no active provider profile/i)
+  })
+})
+
+describe('resolveAliasOnActiveProfile', () => {
+  test('returns the underlying model id when alias matches', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+
+    expect(resolveAliasOnActiveProfile('gemini-flash')).toBe('google/gemini-3-flash-preview')
+  })
+
+  test('returns null when alias does not exist', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    expect(resolveAliasOnActiveProfile('missing')).toBeNull()
+  })
+
+  test('returns null when no active profile', () => {
+    expect(resolveAliasOnActiveProfile('any')).toBeNull()
   })
 })

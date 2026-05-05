@@ -1310,6 +1310,31 @@ export type AliasMutationResult =
   | { ok: true; removed?: boolean }
   | { ok: false; error: string }
 
+export type ListAliasesResult =
+  | { ok: true; entries: Array<{ name: string; model: string }> }
+  | { ok: false; error: string }
+
+export function listAliases(): ListAliasesResult {
+  const active = getActiveProviderProfile()
+  if (!active) {
+    return { ok: false, error: 'no active provider profile; run /provider in-app to configure one' }
+  }
+  const aliases = active.aliases ?? {}
+  const entries = Object.keys(aliases)
+    .sort((a, b) => a.localeCompare(b))
+    .map(name => ({ name, model: aliases[name].model }))
+  return { ok: true, entries }
+}
+
+export function resolveAliasOnActiveProfile(value: string): string | null {
+  const active = getActiveProviderProfile()
+  if (!active || !active.aliases) {
+    return null
+  }
+  const entry = active.aliases[value]
+  return entry ? entry.model : null
+}
+
 export function addAlias(
   name: string,
   modelId: string,
