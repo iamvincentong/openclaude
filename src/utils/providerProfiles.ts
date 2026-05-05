@@ -1385,6 +1385,38 @@ export function addAlias(
   return { ok: true }
 }
 
+export function setLastUsedModel(model: string | undefined): void {
+  const active = getActiveProviderProfile()
+  if (!active) {
+    // No-op intentionally. Auto-resume is best-effort; missing profile is
+    // not a user-actionable error at the model-write call site.
+    return
+  }
+
+  const trimmed = model?.trim()
+  const next = trimmed && trimmed.length > 0 ? trimmed : undefined
+
+  // Skip the write if unchanged — saveGlobalConfig acquires a lock.
+  if (active.lastUsedModel === next) {
+    return
+  }
+
+  saveGlobalConfig(current => {
+    const profiles = getProviderProfiles(current)
+    const idx = profiles.findIndex(p => p.id === active.id)
+    if (idx < 0) return current
+
+    const nextProfile: ProviderProfile = {
+      ...profiles[idx],
+      lastUsedModel: next,
+    }
+    const nextProfiles = [...profiles]
+    nextProfiles[idx] = nextProfile
+
+    return { ...current, providerProfiles: nextProfiles }
+  })
+}
+
 export function removeAlias(name: string): AliasMutationResult {
   const trimmedName = name.trim()
   if (!trimmedName) {

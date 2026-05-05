@@ -13,6 +13,7 @@ import {
   listAliases,
   removeAlias,
   resolveAliasOnActiveProfile,
+  setLastUsedModel,
 } from './providerProfiles.js'
 
 async function importFreshProvidersModule() {
@@ -2042,5 +2043,38 @@ describe('resolveAliasOnActiveProfile', () => {
 
   test('returns null when no active profile', () => {
     expect(resolveAliasOnActiveProfile('any')).toBeNull()
+  })
+})
+
+describe('setLastUsedModel', () => {
+  test('persists the value on the active profile', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    setLastUsedModel('anthropic/claude-opus-4.7')
+    const [profile] = getProviderProfiles()
+    expect(profile.lastUsedModel).toBe('anthropic/claude-opus-4.7')
+  })
+
+  test('clears the value when called with empty / undefined', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    setLastUsedModel('anthropic/claude-opus-4.7')
+    setLastUsedModel(undefined)
+    const [profile] = getProviderProfiles()
+    expect(profile.lastUsedModel).toBeUndefined()
+  })
+
+  test('no-ops silently when no active profile (does not throw)', () => {
+    expect(() => setLastUsedModel('a/b')).not.toThrow()
   })
 })
