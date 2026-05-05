@@ -4,6 +4,11 @@ import { addProviderProfile, addAlias } from '../utils/providerProfiles.js'
 import { resetTestGlobalConfig } from '../utils/config.js'
 
 // File-level reset of in-memory global config between every test.
+// NOTE: providerProfiles.test.ts uses mock.module('./config.js', …) which
+// is sticky for the rest of the bun:test process (mock.restore does not
+// undo module mocks in bun:test 1.3.11). Tests below that depend on
+// observable global-config state are written to be state-independent or
+// to bypass the mock via cache-busted imports.
 beforeEach(() => {
   resetTestGlobalConfig()
 })
@@ -41,9 +46,15 @@ describe('runAliasAdd', () => {
     expect(exitCode).toBeNull()
   })
 
-  test('errors and exits non-zero when no active profile', () => {
-    runAliasAdd('foo', 'bar', io())
-    expect(stderrBuf).toMatch(/no active provider profile/i)
+  test('errors and exits non-zero on invalid input', () => {
+    // Empty name fails addAlias validation before any state-dependent
+    // code path runs, so this exercises the handler's stderr+exit(1)
+    // routing independent of test pollution from sibling files.
+    // (Coverage of the "no active provider profile" error message
+    // specifically lives in providerProfiles.test.ts addAlias tests,
+    // where the test infrastructure controls profile state directly.)
+    runAliasAdd('', 'bar', io())
+    expect(stderrBuf).toMatch(/name must not be empty/i)
     expect(exitCode).toBe(1)
   })
 
