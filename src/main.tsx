@@ -4100,6 +4100,34 @@ async function run(): Promise<CommanderCommand> {
     });
   }
 
+  // claude alias
+
+  const aliasCmd = program.command('alias')
+    .description('Manage model aliases for the active provider profile')
+    .configureHelp(createSortedHelpConfig());
+
+  aliasCmd.command('add <name> <model-id>')
+    .description('Add a short alias for a model id (e.g. gemini-flash → google/gemini-3-flash-preview). Also appends the model id to the profile picker list.')
+    .action(async (name: string, modelId: string) => {
+      const { runAliasAdd } = await import('./commands/alias-cli.js');
+      runAliasAdd(name, modelId);
+    });
+
+  aliasCmd.command('rm <name>')
+    .description('Remove an alias by name (does not modify the profile picker list)')
+    .action(async (name: string) => {
+      const { runAliasRm } = await import('./commands/alias-cli.js');
+      runAliasRm(name);
+    });
+
+  aliasCmd.command('list')
+    .description('List aliases on the active profile, alphabetized')
+    .option('--json', 'Output as JSON', false)
+    .action(async (opts: { json?: boolean }) => {
+      const { runAliasList } = await import('./commands/alias-cli.js');
+      runAliasList({ json: !!opts.json });
+    });
+
   // claude auth
 
   const auth = program.command('auth').description('Manage authentication').configureHelp(createSortedHelpConfig());
