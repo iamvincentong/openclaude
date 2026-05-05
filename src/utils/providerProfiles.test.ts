@@ -1821,3 +1821,35 @@ describe('sanitizeProfile — aliases', () => {
     expect(profile.aliases).toBeUndefined()
   })
 })
+
+describe('sanitizeProfile — lastUsedModel', () => {
+  const baseProfile = {
+    id: 'p1',
+    name: 'OR',
+    provider: 'openai',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openai/gpt-5-mini',
+    apiKey: 'sk-or-x',
+  }
+
+  test('keeps trimmed non-empty lastUsedModel', () => {
+    const [profile] = getProviderProfiles({
+      providerProfiles: [{ ...baseProfile, lastUsedModel: '  anthropic/claude-opus-4.7  ' }],
+    } as Partial<GlobalConfig> as GlobalConfig)
+    expect(profile.lastUsedModel).toBe('anthropic/claude-opus-4.7')
+  })
+
+  test('drops empty / whitespace lastUsedModel', () => {
+    const [profile] = getProviderProfiles({
+      providerProfiles: [{ ...baseProfile, lastUsedModel: '   ' }],
+    } as Partial<GlobalConfig> as GlobalConfig)
+    expect(profile.lastUsedModel).toBeUndefined()
+  })
+
+  test('drops non-string lastUsedModel', () => {
+    const [profile] = getProviderProfiles({
+      providerProfiles: [{ ...baseProfile, lastUsedModel: 42 as unknown as string }],
+    } as Partial<GlobalConfig> as GlobalConfig)
+    expect(profile.lastUsedModel).toBeUndefined()
+  })
+})

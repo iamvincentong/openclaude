@@ -216,6 +216,12 @@ function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   if (aliases) {
     sanitized.aliases = aliases
   }
+  if (typeof profile.lastUsedModel === 'string') {
+    const trimmed = profile.lastUsedModel.trim()
+    if (trimmed.length > 0) {
+      sanitized.lastUsedModel = trimmed
+    }
+  }
   return sanitized
 }
 
