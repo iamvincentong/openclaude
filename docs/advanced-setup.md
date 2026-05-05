@@ -242,6 +242,23 @@ Notes:
 - Local providers such as `http://localhost:11434/v1`, `http://10.0.0.1:11434/v1`, and `http://127.0.0.1:1337/v1` can run without `OPENAI_API_KEY`.
 - Codex profiles validate `CODEX_API_KEY` or the Codex CLI auth file and probe `POST /responses` instead of `GET /models`.
 
+## Model Aliases
+
+Once you've configured a provider profile, you can define **short aliases**
+for the models you swap between, so that `openclaude --model gemini-flash`
+expands to your full OpenRouter id. The next time you run plain
+`openclaude`, the last model you used is restored automatically.
+
+```bash
+openclaude alias add gemini-flash google/gemini-3-flash-preview
+openclaude alias add opus-47       anthropic/claude-opus-4.7
+openclaude alias list
+openclaude --model opus-47
+openclaude   # auto-resumes opus-47
+```
+
+See [Model Aliases](./model-aliases.md) for the full guide.
+
 ## Provider Launch Profiles
 
 Use profile launchers to avoid repeated environment setup:
