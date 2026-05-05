@@ -6,7 +6,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { resetTestGlobalConfig } from './config.js'
 import type { GlobalConfig, ProviderProfile } from './config.js'
-import { getProviderProfiles } from './providerProfiles.js'
+import {
+  addAlias,
+  addProviderProfile,
+  getProviderProfiles,
+  removeAlias,
+} from './providerProfiles.js'
 
 async function importFreshProvidersModule() {
   return import(`./model/providers.ts?ts=${Date.now()}-${Math.random()}`)
@@ -1851,5 +1856,117 @@ describe('sanitizeProfile — lastUsedModel', () => {
       providerProfiles: [{ ...baseProfile, lastUsedModel: 42 as unknown as string }],
     } as Partial<GlobalConfig> as GlobalConfig)
     expect(profile.lastUsedModel).toBeUndefined()
+  })
+})
+
+describe('addAlias', () => {
+  test('adds an alias and appends underlying model to comma-list when absent', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+
+    const result = addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+    expect(result.ok).toBe(true)
+
+    const [profile] = getProviderProfiles()
+    expect(profile.aliases).toEqual({
+      'gemini-flash': { model: 'google/gemini-3-flash-preview' },
+    })
+    expect(profile.model).toContain('google/gemini-3-flash-preview')
+    expect(profile.model).toContain('openai/gpt-5-mini')
+  })
+
+  test('does not duplicate model in comma-list when already present', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'google/gemini-3-flash-preview, openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+
+    addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+    const [profile] = getProviderProfiles()
+    expect(profile.model.split(',').filter(s => s.trim() === 'google/gemini-3-flash-preview')).toHaveLength(1)
+  })
+
+  test('is idempotent — re-adding same name overwrites entry', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+
+    addAlias('m', 'a/b')
+    addAlias('m', 'c/d')
+    const [profile] = getProviderProfiles()
+    expect(profile.aliases).toEqual({ m: { model: 'c/d' } })
+  })
+
+  test('returns error when no active profile exists', () => {
+    // Don't add any profile.
+    const result = addAlias('foo', 'bar')
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/no active provider profile/i)
+  })
+
+  test('returns error for invalid alias name', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    const result = addAlias('bad name', 'a/b')
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/invalid alias name/i)
+  })
+})
+
+describe('removeAlias', () => {
+  test('removes an existing alias and leaves model comma-list untouched', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    addAlias('m', 'a/b')
+
+    const result = removeAlias('m')
+    expect(result.ok).toBe(true)
+    expect(result.removed).toBe(true)
+
+    const [profile] = getProviderProfiles()
+    expect(profile.aliases).toBeUndefined()
+    // Underlying model remains in comma-list per spec §4.3 alias rm bullet.
+    expect(profile.model).toContain('a/b')
+  })
+
+  test('reports removed=false (no-op) when alias does not exist', () => {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+    const result = removeAlias('missing')
+    expect(result.ok).toBe(true)
+    expect(result.removed).toBe(false)
+  })
+
+  test('returns error when no active profile exists', () => {
+    const result = removeAlias('m')
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatch(/no active provider profile/i)
   })
 })

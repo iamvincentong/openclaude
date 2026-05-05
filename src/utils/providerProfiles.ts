@@ -1301,3 +1301,102 @@ export function clearActiveOpenAIModelOptionsCache(): void {
     }
   })
 }
+
+const ALIAS_NAME_RE_EXPORT = /^[A-Za-z0-9._:-]+$/
+
+export type AliasMutationResult =
+  | { ok: true; removed?: boolean }
+  | { ok: false; error: string }
+
+function isValidAliasName(name: string): boolean {
+  return ALIAS_NAME_RE_EXPORT.test(name) && !name.startsWith('--')
+}
+
+export function addAlias(
+  name: string,
+  modelId: string,
+): AliasMutationResult {
+  const trimmedName = name.trim()
+  const trimmedModel = modelId.trim()
+
+  if (!trimmedName) {
+    return { ok: false, error: 'alias name must not be empty' }
+  }
+  if (!isValidAliasName(trimmedName)) {
+    return { ok: false, error: `invalid alias name "${trimmedName}" (allowed: letters, digits, . _ : -)` }
+  }
+  if (!trimmedModel) {
+    return { ok: false, error: 'model id must not be empty' }
+  }
+
+  const active = getActiveProviderProfile()
+  if (!active) {
+    return { ok: false, error: 'no active provider profile; run /provider in-app to configure one' }
+  }
+
+  saveGlobalConfig(current => {
+    const profiles = getProviderProfiles(current)
+    const idx = profiles.findIndex(p => p.id === active.id)
+    if (idx < 0) return current
+
+    const profile = profiles[idx]
+    const existingModels = parseModelList(profile.model)
+    const updatedModels = existingModels.includes(trimmedModel)
+      ? existingModels
+      : [...existingModels, trimmedModel]
+
+    const nextProfile: ProviderProfile = {
+      ...profile,
+      model: updatedModels.join(', '),
+      aliases: {
+        ...(profile.aliases ?? {}),
+        [trimmedName]: { model: trimmedModel },
+      },
+    }
+    const nextProfiles = [...profiles]
+    nextProfiles[idx] = nextProfile
+
+    return { ...current, providerProfiles: nextProfiles }
+  })
+
+  return { ok: true }
+}
+
+export function removeAlias(name: string): AliasMutationResult {
+  const trimmedName = name.trim()
+  if (!trimmedName) {
+    return { ok: false, error: 'alias name must not be empty' }
+  }
+
+  const active = getActiveProviderProfile()
+  if (!active) {
+    return { ok: false, error: 'no active provider profile; run /provider in-app to configure one' }
+  }
+
+  let removed = false
+
+  saveGlobalConfig(current => {
+    const profiles = getProviderProfiles(current)
+    const idx = profiles.findIndex(p => p.id === active.id)
+    if (idx < 0) return current
+
+    const profile = profiles[idx]
+    if (!profile.aliases || !(trimmedName in profile.aliases)) {
+      return current
+    }
+
+    const { [trimmedName]: _omitted, ...rest } = profile.aliases
+    removed = true
+
+    const nextProfile: ProviderProfile = {
+      ...profile,
+      aliases: Object.keys(rest).length > 0 ? rest : undefined,
+    }
+    const nextProfiles = [...profiles]
+    nextProfiles[idx] = nextProfile
+
+    return { ...current, providerProfiles: nextProfiles }
+  })
+
+  return { ok: true, removed }
+}
