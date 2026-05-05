@@ -214,22 +214,18 @@ export function applyProviderFlag(
 
     case 'openai':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
-      if (model) process.env.OPENAI_MODEL = model
       break
 
     case 'gemini':
       process.env.CLAUDE_CODE_USE_GEMINI = '1'
-      if (model) process.env.GEMINI_MODEL = model
       break
 
     case 'mistral':
       process.env.CLAUDE_CODE_USE_MISTRAL = '1'
-      if (model) process.env.MISTRAL_MODEL = model
       break
 
     case 'github':
       process.env.CLAUDE_CODE_USE_GITHUB = '1'
-      if (model) process.env.OPENAI_MODEL = model
       break
 
     case 'bedrock':
@@ -246,7 +242,6 @@ export function applyProviderFlag(
       if (!process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = 'ollama'
       }
-      if (model) process.env.OPENAI_MODEL = model
       break
 
     case 'nvidia-nim':
@@ -257,14 +252,12 @@ export function applyProviderFlag(
         process.env.OPENAI_API_KEY = process.env.NVIDIA_API_KEY
       }
       process.env.OPENAI_MODEL ??= 'nvidia/llama-3.1-nemotron-70b-instruct'
-      if (model) process.env.OPENAI_MODEL = model
       break
 
     case 'bankr':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       process.env.OPENAI_BASE_URL ??= defaultBaseUrl ?? 'https://llm.bankr.bot/v1'
       process.env.OPENAI_MODEL ??= 'claude-opus-4.6'
-      if (model) process.env.OPENAI_MODEL = model
       if (process.env.BNKR_API_KEY && !process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = process.env.BNKR_API_KEY
       }
@@ -278,18 +271,26 @@ export function applyProviderFlag(
       if (defaultModel) {
         process.env.OPENAI_MODEL ??= defaultModel
       }
-      if (model) process.env.OPENAI_MODEL = model
       break
 
     case 'xai':
       process.env.CLAUDE_CODE_USE_OPENAI = '1'
       process.env.OPENAI_BASE_URL ??= 'https://api.x.ai/v1'
       process.env.OPENAI_MODEL ??= 'grok-4'
-      if (model) process.env.OPENAI_MODEL = model
       if (process.env.XAI_API_KEY && !process.env.OPENAI_API_KEY) {
         process.env.OPENAI_API_KEY = process.env.XAI_API_KEY
       }
       break
+  }
+
+  // Unified --model write. Same routing as the previous per-case writes,
+  // but driven by getModelEnvVarForProvider so future providers only
+  // update one function.
+  if (model) {
+    const envVar = getModelEnvVarForProvider(provider)
+    if (envVar) {
+      process.env[envVar] = model
+    }
   }
 
   return {}
