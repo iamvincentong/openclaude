@@ -188,18 +188,29 @@ export type Providers = string
 export type OpenAICompatibleApiFormat = 'chat_completions' | 'responses'
 export type OpenAICompatibleAuthScheme = 'bearer' | 'raw'
 
+export type AliasEntry = {
+  /** Resolved full model id, e.g. "google/gemini-3-flash-preview". */
+  model: string
+  // Reserved for future BYOK enforcement (out of scope this change):
+  // routing?: { only?: string[]; allowFallbacks?: boolean }
+}
+
 export type ProviderProfile = {
   id: string
   name: string
   provider: Providers
   baseUrl: string
   model: string
+  /** Map of short alias names to model entries. Per-profile, OpenAI-compatible-only by default. */
+  aliases?: Record<string, AliasEntry>
   apiKey?: string
   apiFormat?: OpenAICompatibleApiFormat
   authHeader?: string
   authScheme?: OpenAICompatibleAuthScheme
   authHeaderValue?: string
   customHeaders?: Record<string, string>
+  /** The model id that was active at the end of the previous session for this profile. Used for auto-resume. Stores the resolved model id, not an alias name. */
+  lastUsedModel?: string
 }
 
 export type GlobalConfig = {
