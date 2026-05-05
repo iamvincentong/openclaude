@@ -494,12 +494,14 @@ describe('applyProviderFlagFromArgs — alias resolution', () => {
   })
 
   test('alias is naturally skipped for anthropic provider (no env var to write)', () => {
-    // No OR profile here — addProviderProfile activates and writes OPENAI_MODEL,
-    // which would mask the assertion. We only need an alias and anthropic provider.
+    setupOpenRouterProfile()
     addAlias('opus-47', 'anthropic/claude-opus-4.7')
+    // Clear the side-effect from setActiveProviderProfile (which sets
+    // OPENAI_MODEL when the OpenRouter profile becomes active).
+    delete process.env.OPENAI_MODEL
     applyProviderFlagFromArgs(['--provider', 'anthropic', '--model', 'opus-47'])
-    // anthropic path doesn't write any *_MODEL via --model — model comes
-    // from saved profile / ANTHROPIC_MODEL. Confirm we don't pollute OPENAI_MODEL.
+    // anthropic path returns null from getModelEnvVarForProvider, so no
+    // *_MODEL is written even though the alias resolves to claude-opus-4.7.
     expect(process.env.OPENAI_MODEL).toBeUndefined()
   })
 })
