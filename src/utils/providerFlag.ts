@@ -22,6 +22,7 @@ import {
   resolveProfileRoute,
 } from '../integrations/index.js'
 import { PRESET_VENDOR_MAP } from '../integrations/compatibility.js'
+import { resolveAliasOnActiveProfile } from './providerProfiles.js'
 
 const PREFERRED_PROVIDER_ORDER = [
   'anthropic',
@@ -286,10 +287,13 @@ export function applyProviderFlag(
   // Unified --model write. Same routing as the previous per-case writes,
   // but driven by getModelEnvVarForProvider so future providers only
   // update one function.
+  // Resolve --model: alias first (against the active provider profile's
+  // alias map), then verbatim. Single env-var write.
   if (model) {
     const envVar = getModelEnvVarForProvider(provider)
     if (envVar) {
-      process.env[envVar] = model
+      const resolved = resolveAliasOnActiveProfile(model) ?? model
+      process.env[envVar] = resolved
     }
   }
 

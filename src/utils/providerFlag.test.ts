@@ -7,6 +7,12 @@ import {
   getModelEnvVarForProvider,
   VALID_PROVIDERS,
 } from './providerFlag.js'
+import { addAlias, addProviderProfile } from './providerProfiles.js'
+import { resetTestGlobalConfig } from './config.js'
+
+beforeEach(() => {
+  resetTestGlobalConfig()
+})
 
 const ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -433,5 +439,67 @@ describe('getModelEnvVarForProvider', () => {
     expect(getModelEnvVarForProvider('anthropic')).toBeNull()
     expect(getModelEnvVarForProvider('bedrock')).toBeNull()
     expect(getModelEnvVarForProvider('vertex')).toBeNull()
+  })
+})
+
+describe('applyProviderFlagFromArgs — alias resolution', () => {
+  beforeEach(() => {
+    // Per-describe: clear env vars (they aren't part of the global config).
+    delete process.env.OPENAI_MODEL
+    delete process.env.OPENAI_BASE_URL
+    delete process.env.GEMINI_MODEL
+    delete process.env.MISTRAL_MODEL
+    delete process.env.CLAUDE_CODE_USE_OPENAI
+    delete process.env.CLAUDE_CODE_USE_GEMINI
+    delete process.env.CLAUDE_CODE_USE_MISTRAL
+  })
+
+  function setupOpenRouterProfile(): void {
+    addProviderProfile({
+      provider: 'openai',
+      name: 'OR',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-5-mini',
+      apiKey: 'sk-or-x',
+    })
+  }
+
+  test('alias resolves to underlying model id when active profile defines it', () => {
+    setupOpenRouterProfile()
+    addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+
+    const result = applyProviderFlagFromArgs(['--provider', 'openai', '--model', 'gemini-flash'])
+    expect(result?.error).toBeUndefined() // no error
+    expect(process.env.OPENAI_MODEL).toBe('google/gemini-3-flash-preview')
+  })
+
+  test('verbatim model id passes through when no alias matches', () => {
+    setupOpenRouterProfile()
+    applyProviderFlagFromArgs(['--provider', 'openai', '--model', 'openai/gpt-5-mini'])
+    expect(process.env.OPENAI_MODEL).toBe('openai/gpt-5-mini')
+  })
+
+  test('alias wins on collision with real model id', () => {
+    setupOpenRouterProfile()
+    addAlias('gpt-5-mini', 'shadow-target')
+    applyProviderFlagFromArgs(['--provider', 'openai', '--model', 'gpt-5-mini'])
+    expect(process.env.OPENAI_MODEL).toBe('shadow-target')
+  })
+
+  test('--model=foo equals form works with alias resolution', () => {
+    setupOpenRouterProfile()
+    addAlias('gemini-flash', 'google/gemini-3-flash-preview')
+    applyProviderFlagFromArgs(['--provider=openai', '--model=gemini-flash'])
+    expect(process.env.OPENAI_MODEL).toBe('google/gemini-3-flash-preview')
+  })
+
+  test('alias is naturally skipped for anthropic provider (no env var to write)', () => {
+    // No OR profile here — addProviderProfile activates and writes OPENAI_MODEL,
+    // which would mask the assertion. We only need an alias and anthropic provider.
+    addAlias('opus-47', 'anthropic/claude-opus-4.7')
+    applyProviderFlagFromArgs(['--provider', 'anthropic', '--model', 'opus-47'])
+    // anthropic path doesn't write any *_MODEL via --model — model comes
+    // from saved profile / ANTHROPIC_MODEL. Confirm we don't pollute OPENAI_MODEL.
+    expect(process.env.OPENAI_MODEL).toBeUndefined()
   })
 })
