@@ -5,7 +5,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 import { resetTestGlobalConfig } from './config.js'
-import type { ProviderProfile } from './config.js'
+import type { GlobalConfig, ProviderProfile } from './config.js'
+import { getProviderProfiles } from './providerProfiles.js'
 
 async function importFreshProvidersModule() {
   return import(`./model/providers.ts?ts=${Date.now()}-${Math.random()}`)
@@ -1757,5 +1758,66 @@ describe('setActiveProviderProfile model cache', () => {
         description: 'Provider: Multi Provider',
       },
     ])
+  })
+})
+
+describe('sanitizeProfile — aliases', () => {
+  const baseProfile = {
+    id: 'p1',
+    name: 'OR',
+    provider: 'openai',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openai/gpt-5-mini',
+    apiKey: 'sk-or-x',
+  }
+
+  test('drops alias entries with invalid name characters', () => {
+    const config = {
+      providerProfiles: [
+        {
+          ...baseProfile,
+          aliases: {
+            'good-name':   { model: 'openai/gpt-5-mini' },
+            'bad name':    { model: 'openai/gpt-5-mini' }, // space
+            '--bad':       { model: 'openai/gpt-5-mini' }, // -- prefix
+            '':            { model: 'openai/gpt-5-mini' }, // empty
+          },
+        },
+      ],
+    } as Partial<GlobalConfig> as GlobalConfig
+
+    const [profile] = getProviderProfiles(config)
+    expect(profile.aliases).toEqual({
+      'good-name': { model: 'openai/gpt-5-mini' },
+    })
+  })
+
+  test('drops alias entries with empty model', () => {
+    const config = {
+      providerProfiles: [
+        {
+          ...baseProfile,
+          aliases: {
+            ok: { model: 'openai/gpt-5-mini' },
+            empty: { model: '' },
+            whitespace: { model: '   ' },
+          },
+        },
+      ],
+    } as Partial<GlobalConfig> as GlobalConfig
+
+    const [profile] = getProviderProfiles(config)
+    expect(profile.aliases).toEqual({
+      ok: { model: 'openai/gpt-5-mini' },
+    })
+  })
+
+  test('omits aliases field when input is undefined', () => {
+    const config = {
+      providerProfiles: [baseProfile],
+    } as Partial<GlobalConfig> as GlobalConfig
+
+    const [profile] = getProviderProfiles(config)
+    expect(profile.aliases).toBeUndefined()
   })
 })

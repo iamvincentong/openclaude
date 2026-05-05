@@ -6,6 +6,7 @@ import {
 import {
   getGlobalConfig,
   saveGlobalConfig,
+  type AliasEntry,
   type ProviderProfile,
 } from './config.js'
 import type { ModelOption } from './model/modelOptions.js'
@@ -140,6 +141,35 @@ function resolveProfileCapabilityRouteId(
   )
 }
 
+const ALIAS_NAME_RE = /^[A-Za-z0-9._:-]+$/
+
+function sanitizeAliases(
+  raw: unknown,
+): Record<string, AliasEntry> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined
+  }
+  const out: Record<string, AliasEntry> = {}
+  for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!ALIAS_NAME_RE.test(name) || name.startsWith('--')) {
+      continue
+    }
+    if (!entry || typeof entry !== 'object') {
+      continue
+    }
+    const model = (entry as { model?: unknown }).model
+    if (typeof model !== 'string') {
+      continue
+    }
+    const trimmed = model.trim()
+    if (trimmed.length === 0) {
+      continue
+    }
+    out[name] = { model: trimmed }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   const id = trimValue(profile.id)
   const name = trimValue(profile.name)
@@ -181,6 +211,10 @@ function sanitizeProfile(profile: ProviderProfile): ProviderProfile | null {
   }
   if (customHeaders) {
     sanitized.customHeaders = customHeaders
+  }
+  const aliases = sanitizeAliases(profile.aliases)
+  if (aliases) {
+    sanitized.aliases = aliases
   }
   return sanitized
 }
