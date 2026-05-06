@@ -4128,6 +4128,28 @@ async function run(): Promise<CommanderCommand> {
       runAliasList({ json: !!opts.json });
     });
 
+  // claude provider
+
+  const providerCmd = program.command('provider')
+    .description('Manage cached provider model catalogs')
+    .configureHelp(createSortedHelpConfig());
+
+  providerCmd.command('update <id>')
+    .description('Fetch the model catalog for <id> (e.g. openrouter) and save it under ~/.openclaude/providers/<id>.json')
+    .action(async (id: string) => {
+      const { runProviderUpdate } = await import('./commands/provider-cli.js');
+      await runProviderUpdate(id);
+    });
+
+  providerCmd.command('list <id>')
+    .description('List models from the saved catalog for <id>')
+    .option('--full', 'Include pricing columns', false)
+    .option('--json', 'Print the raw saved catalog as JSON', false)
+    .action(async (id: string, opts: { full?: boolean; json?: boolean }) => {
+      const { runProviderList } = await import('./commands/provider-cli.js');
+      await runProviderList(id, { full: !!opts.full, json: !!opts.json });
+    });
+
   // claude auth
 
   const auth = program.command('auth').description('Manage authentication').configureHelp(createSortedHelpConfig());
