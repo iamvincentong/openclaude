@@ -88,7 +88,7 @@ export async function loadCatalog(
   }
 
   if (!isValidEnvelope(parsed)) {
-    throw new Error(`corrupt catalog at ${path}: missing or invalid envelope fields (version contract violation)`)
+    throw new Error(`corrupt catalog at ${path}: missing or invalid envelope fields`)
   }
   return parsed
 }

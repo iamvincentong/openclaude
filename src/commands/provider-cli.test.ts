@@ -211,7 +211,13 @@ describe('runProviderList', () => {
     mkdirSync(join(dir, 'providers'), { recursive: true })
     writeFileSync(
       join(dir, 'providers', 'openrouter.json'),
-      JSON.stringify({ version: 999, provider: 'openrouter', raw: {} }),
+      JSON.stringify({
+        version: 999,
+        provider: 'openrouter',
+        endpoint: 'https://openrouter.ai/api/v1/models',
+        fetchedAt: '2026-05-06T00:00:00.000Z',
+        raw: {},
+      }),
       'utf-8',
     )
     await runProviderList('openrouter', {}, makeIO(captured))
