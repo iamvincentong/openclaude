@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto'
 import { join } from 'path'
 import { getClaudeConfigHomeDir } from '../envUtils.js'
 import { getFsImplementation } from '../fsOperations.js'
+import { logError } from '../log.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import {
   ENVELOPE_VERSION,
@@ -29,18 +30,29 @@ export async function saveCatalog(
   const finalPath = getProviderCatalogPath(adapterId)
   const tempPath = `${finalPath}.${randomBytes(8).toString('hex')}.tmp`
 
-  await fs.mkdir(dir)
-
-  const content = jsonStringify(envelope, null, 2)
-  const handle = await open(tempPath, 'w', 0o600)
   try {
-    await handle.writeFile(content, { encoding: 'utf-8' })
-    await handle.sync()
-  } finally {
-    await handle.close()
+    await fs.mkdir(dir)
+
+    const content = jsonStringify(envelope, null, 2)
+    const handle = await open(tempPath, 'w', 0o600)
+    try {
+      await handle.writeFile(content, { encoding: 'utf-8' })
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+
+    await fs.rename(tempPath, finalPath)
+  } catch (error) {
+    logError(error)
+    try {
+      await fs.unlink(tempPath)
+    } catch {
+      // Ignore cleanup errors.
+    }
+    throw error
   }
 
-  await fs.rename(tempPath, finalPath)
   return finalPath
 }
 
