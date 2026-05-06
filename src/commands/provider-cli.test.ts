@@ -117,3 +117,117 @@ describe('runProviderUpdate', () => {
     expect(captured.exitCode).toBe(1)
   })
 })
+
+describe('runProviderList', () => {
+  let dir: string
+  let originalConfigDir: string | undefined
+  let captured: Captured
+
+  beforeEach(() => {
+    resetTestGlobalConfig()
+    originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+    dir = mkdtempSync(join(tmpdir(), 'oc-cat-'))
+    process.env.CLAUDE_CONFIG_DIR = dir
+    captured = { stdoutBuf: '', stderrBuf: '', exitCode: null }
+  })
+
+  afterEach(() => {
+    if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  function seedCatalog() {
+    mkdirSync(join(dir, 'providers'), { recursive: true })
+    const envelope = {
+      version: 1,
+      provider: 'openrouter',
+      endpoint: 'https://openrouter.ai/api/v1/models',
+      fetchedAt: '2026-05-06T00:00:00.000Z',
+      raw: {
+        data: [
+          {
+            id: 'zzz/last',
+            name: 'Z Last',
+            context_length: 100,
+            pricing: { prompt: '0.001', completion: '0.002' },
+          },
+          {
+            id: 'aaa/first',
+            name: 'A First',
+            context_length: 200,
+            pricing: { prompt: '0.000005', completion: '0.00003' },
+          },
+        ],
+      },
+    }
+    writeFileSync(
+      join(dir, 'providers', 'openrouter.json'),
+      JSON.stringify(envelope),
+      'utf-8',
+    )
+  }
+
+  test('default text output is alphabetized and has 3 tab-separated columns', async () => {
+    seedCatalog()
+    await runProviderList('openrouter', {}, makeIO(captured))
+    const lines = captured.stdoutBuf.trim().split('\n')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toBe('aaa/first\tA First\t200')
+    expect(lines[1]).toBe('zzz/last\tZ Last\t100')
+    expect(captured.exitCode).toBeNull()
+  })
+
+  test('--full appends two pricing columns', async () => {
+    seedCatalog()
+    await runProviderList('openrouter', { full: true }, makeIO(captured))
+    const lines = captured.stdoutBuf.trim().split('\n')
+    expect(lines[0]).toBe('aaa/first\tA First\t200\t0.000005\t0.00003')
+    expect(lines[1]).toBe('zzz/last\tZ Last\t100\t0.001\t0.002')
+  })
+
+  test('--json prints the raw response verbatim', async () => {
+    seedCatalog()
+    await runProviderList('openrouter', { json: true }, makeIO(captured))
+    const parsed = JSON.parse(captured.stdoutBuf)
+    expect(parsed.data).toHaveLength(2)
+    expect(parsed.data[0].id).toBe('zzz/last') // raw is unsorted by design
+  })
+
+  test('missing file → friendly stdout, exit 0', async () => {
+    await runProviderList('openrouter', {}, makeIO(captured))
+    expect(captured.stdoutBuf).toMatch(/no catalog yet/i)
+    expect(captured.stdoutBuf).toMatch(/openclaude provider update openrouter/)
+    expect(captured.exitCode).toBeNull()
+  })
+
+  test('unknown adapter → stderr + exit 1', async () => {
+    await runProviderList('nope', {}, makeIO(captured))
+    expect(captured.stderrBuf).toMatch(/unknown provider/i)
+    expect(captured.exitCode).toBe(1)
+  })
+
+  test('wrong envelope version → stderr + exit 1', async () => {
+    mkdirSync(join(dir, 'providers'), { recursive: true })
+    writeFileSync(
+      join(dir, 'providers', 'openrouter.json'),
+      JSON.stringify({ version: 999, provider: 'openrouter', raw: {} }),
+      'utf-8',
+    )
+    await runProviderList('openrouter', {}, makeIO(captured))
+    expect(captured.stderrBuf).toMatch(/version/i)
+    expect(captured.exitCode).toBe(1)
+  })
+
+  test('corrupt JSON → stderr + exit 1', async () => {
+    mkdirSync(join(dir, 'providers'), { recursive: true })
+    writeFileSync(
+      join(dir, 'providers', 'openrouter.json'),
+      '{not valid',
+      'utf-8',
+    )
+    await runProviderList('openrouter', {}, makeIO(captured))
+    expect(captured.stderrBuf).toMatch(/parse/i)
+    expect(captured.exitCode).toBe(1)
+  })
+})

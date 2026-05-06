@@ -99,10 +99,53 @@ export async function runProviderUpdate(
 }
 
 export async function runProviderList(
-  _id: string,
-  _opts: { full?: boolean; json?: boolean },
-  _io: ProviderCliIO = realIO,
+  id: string,
+  opts: { full?: boolean; json?: boolean },
+  io: ProviderCliIO = realIO,
 ): Promise<void> {
-  // Filled in next task — placeholder so import paths stay stable.
-  throw new Error('runProviderList not yet implemented')
+  const adapter = requireAdapter(id, io)
+  if (!adapter) return
+
+  let envelope: CatalogEnvelope | null
+  try {
+    envelope = await loadCatalog(adapter.id)
+  } catch (err) {
+    io.stderr(`error: ${(err as Error).message}\n`)
+    io.exit(1)
+    return
+  }
+
+  if (!envelope) {
+    io.stdout(
+      `(no catalog yet — run: openclaude provider update ${adapter.id})\n`,
+    )
+    return
+  }
+
+  if (envelope.version !== ENVELOPE_VERSION) {
+    io.stderr(
+      `error: catalog format version ${String(envelope.version)} unsupported (expected ${ENVELOPE_VERSION}). re-run: openclaude provider update ${adapter.id}\n`,
+    )
+    io.exit(1)
+    return
+  }
+
+  if (opts.json) {
+    io.stdout(JSON.stringify(envelope.raw, null, 2) + '\n')
+    return
+  }
+
+  const rows = adapter.toSummary(envelope.raw)
+  for (const row of rows) {
+    const cols = [
+      row.id,
+      row.name,
+      row.contextLength === null ? '' : String(row.contextLength),
+    ]
+    if (opts.full) {
+      cols.push(row.pricing?.prompt ?? '')
+      cols.push(row.pricing?.completion ?? '')
+    }
+    io.stdout(cols.join('\t') + '\n')
+  }
 }
