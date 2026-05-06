@@ -13,6 +13,19 @@ import {
 
 const PROVIDERS_DIRNAME = 'providers'
 
+function isValidEnvelope(value: unknown): value is CatalogEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+  const v = value as Record<string, unknown>
+  if (typeof v.version !== 'number' || !Number.isFinite(v.version)) return false
+  if (typeof v.provider !== 'string' || v.provider.length === 0) return false
+  if (typeof v.endpoint !== 'string' || v.endpoint.length === 0) return false
+  if (typeof v.fetchedAt !== 'string' || v.fetchedAt.length === 0) return false
+  if (!('raw' in v)) return false
+  return true
+}
+
 export function getProvidersDir(): string {
   return join(getClaudeConfigHomeDir(), PROVIDERS_DIRNAME)
 }
@@ -74,7 +87,10 @@ export async function loadCatalog(
     throw new Error(`failed to parse catalog at ${path}: ${(err as Error).message}`)
   }
 
-  return parsed as CatalogEnvelope
+  if (!isValidEnvelope(parsed)) {
+    throw new Error(`corrupt catalog at ${path}: missing or invalid envelope fields (version contract violation)`)
+  }
+  return parsed
 }
 
 export { ENVELOPE_VERSION }

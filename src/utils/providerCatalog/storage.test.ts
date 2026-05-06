@@ -79,4 +79,16 @@ describe('provider catalog storage', () => {
     writeFileSync(join(dir, 'providers', 'openrouter.json'), 'not json{', 'utf-8')
     await expect(loadCatalog('openrouter')).rejects.toThrow(/parse/i)
   })
+
+  test('loadCatalog throws on structurally invalid envelope', async () => {
+    const { writeFileSync, mkdirSync } = await import('fs')
+    mkdirSync(join(dir, 'providers'), { recursive: true })
+    // version present, but other required envelope fields missing
+    writeFileSync(
+      join(dir, 'providers', 'openrouter.json'),
+      JSON.stringify({ version: 1 }),
+      'utf-8',
+    )
+    await expect(loadCatalog('openrouter')).rejects.toThrow(/corrupt catalog/i)
+  })
 })
