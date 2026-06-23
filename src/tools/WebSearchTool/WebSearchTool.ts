@@ -2,6 +2,7 @@ import type {
   BetaContentBlock,
   BetaWebSearchTool20250305,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import { PRODUCT_DISPLAY_NAME } from 'src/constants/product.js'
 import { getAPIProvider } from 'src/utils/model/providers.js'
 import type { PermissionResult } from 'src/utils/permissions/PermissionResult.js'
 
@@ -244,13 +245,12 @@ function addCodexSource(
   sourceMap: Map<string, { title: string; url: string }>,
   source: unknown,
 ): void {
-  if (typeof source?.url !== 'string' || !source.url) return
-  sourceMap.set(source.url, {
-    title:
-      typeof source.title === 'string' && source.title
-        ? source.title
-        : source.url,
-    url: source.url,
+  if (typeof source !== 'object' || source === null) return
+  const { url, title } = source as { url?: unknown; title?: unknown }
+  if (typeof url !== 'string' || !url) return
+  sourceMap.set(url, {
+    title: typeof title === 'string' && title ? title : url,
+    url,
   })
 }
 
@@ -350,10 +350,33 @@ function makeOutputFromCodexWebSearchResponse(
   }
 }
 
+/**
+ * Build the user-facing error thrown when the adapter path (DDG / Firecrawl /
+ * Tavily / etc.) fails in auto mode and the current provider has NO native
+ * web-search fallback (openai-shim providers like moonshot/minimax/nvidia-nim/
+ * github copilot). Without this, the only signal would be a `console.error`
+ * the user never sees, and the eventual native call silently returns
+ * "Did 0 searches" — issue #994.
+ *
+ * The embedded `errMsg` carries the underlying adapter failure (rate-limit,
+ * timeout, 5xx, etc.) so the user can act on it instead of guessing.
+ */
+function buildAdapterUnavailableError(
+  provider: string,
+  errMsg: string,
+): string {
+  return (
+    `Web search is unavailable for provider "${provider}". ` +
+    `The search adapter failed (${errMsg}). ` +
+    `Try switching to a provider with built-in web search (e.g. Anthropic, Codex) or try again later.`
+  )
+}
+
 export const __test = {
   makeOutputFromCodexWebSearchResponse,
   buildEmptyAdapterResultHint,
   formatProviderOutputWithEmptyHint,
+  buildAdapterUnavailableError,
 }
 
 async function runCodexWebSearch(
@@ -556,7 +579,7 @@ export const WebSearchTool = buildTool({
   maxResultSizeChars: 100_000,
   shouldDefer: true,
   async description(input) {
-    return `Claude wants to search the web for: ${input.query}`
+    return `${PRODUCT_DISPLAY_NAME} wants to search the web for: ${input.query}`
   },
   userFacingName() {
     return 'Web Search'
@@ -720,12 +743,14 @@ export const WebSearchTool = buildTool({
         if (!hasNativeSearchFallback()) {
           const provider = getAPIProvider()
           const errMsg = err instanceof Error ? err.message : String(err)
-          throw new Error(
-            `Web search is unavailable for provider "${provider}". ` +
-              `The search adapter failed (${errMsg}). ` +
-              `Try switching to a provider with built-in web search (e.g. Anthropic, Codex) or try again later.`,
-          )
+          throw new Error(buildAdapterUnavailableError(provider, errMsg))
         }
+        // This branch is only reachable if a future provider-selection change
+        // both invokes the adapter AND has a native fallback ready. Today,
+        // `shouldUseAdapterProvider()` returns false whenever
+        // `hasNativeSearchFallback()` returns true (auto mode prefers native
+        // for firstParty/vertex/foundry/Codex), so this path is intentionally
+        // a no-op pass-through: silent log + fall through to native below.
         console.error(
           `[web-search] Adapter failed, falling through to native: ${err}`,
         )
@@ -734,9 +759,11 @@ export const WebSearchTool = buildTool({
 
     // --- Codex / OpenAI Responses path ---
     if (isCodexResponsesWebSearchEnabled()) {
-      return {
-        data: await runCodexWebSearch(input, context.abortController.signal),
-      }
+      const codexData = await runCodexWebSearch(
+        input,
+        context.abortController.signal,
+      )
+      return { data: codexData }
     }
 
     // --- Native Anthropic path (firstParty / vertex / foundry) ---
@@ -779,7 +806,7 @@ export const WebSearchTool = buildTool({
     })
 
     const allContentBlocks: BetaContentBlock[] = []
-    let currentToolUseId = null
+    let currentToolUseId: string | null = null
     let currentToolUseJson = ''
     let progressCounter = 0
     const toolUseQueries = new Map() // Map of tool_use_id to query

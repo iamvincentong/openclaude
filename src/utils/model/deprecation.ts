@@ -44,7 +44,9 @@ const DEPRECATED_MODELS: Record<string, DeprecationEntry> = {
       codex: null,
       'nvidia-nim': null,
       minimax: null,
+      'xiaomi-mimo': null,
       mistral: null,
+      xai: null,
     },
   },
   'claude-3-7-sonnet': {
@@ -60,7 +62,9 @@ const DEPRECATED_MODELS: Record<string, DeprecationEntry> = {
       codex: null,
       'nvidia-nim': null,
       minimax: null,
+      'xiaomi-mimo': null,
       mistral: null,
+      xai: null,
     },
   },
   'claude-3-5-haiku': {
@@ -76,7 +80,9 @@ const DEPRECATED_MODELS: Record<string, DeprecationEntry> = {
       codex: null,
       'nvidia-nim': null,
       minimax: null,
+      'xiaomi-mimo': null,
       mistral: null,
+      xai: null,
     },
   },
 }

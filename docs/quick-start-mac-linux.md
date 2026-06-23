@@ -4,7 +4,7 @@ This guide uses a standard shell such as Terminal, iTerm, bash, or zsh.
 
 ## 1. Install Node.js
 
-Install Node.js 20 or newer from:
+Install Node.js 22 LTS or newer from:
 
 - `https://nodejs.org/`
 
@@ -18,9 +18,13 @@ npm --version
 ## 2. Install OpenClaude
 
 ```bash
-npm install -g @gitlawb/openclaude
+npm install -g @gitlawb/openclaude@latest
 ```
+On Arch Linux, you can alternatively install OpenClaude via the community-maintained [AUR package](https://aur.archlinux.org/packages/openclaude):
 
+```bash
+paru -S openclaude
+```
 ## 3. Pick One Provider
 
 ### Option A: OpenAI
@@ -95,6 +99,17 @@ Replace `your-model-name` with the model name shown in LM Studio.
 
 No API key is needed for LM Studio local models (but uncomment the `OPENAI_API_KEY` line if you hit auth errors).
 
+### Option E: Using a .env file (Optional)
+
+If you prefer to keep your keys in a `.env` file instead of exporting them individually, note that OpenClaude does not load `.env` files automatically. You must explicitly pass it:
+
+```bash
+openclaude --provider-env-file .env
+```
+
+Keep `.env` out of git because it contains secrets.
+The explicit loader accepts provider/setup variables. Export runtime/debug variables from your shell or launcher instead.
+
 ## 4. If `openclaude` Is Not Found
 
 Close the terminal, open a new one, and try again:
@@ -128,14 +143,27 @@ Check the basics:
 
 ## 6. Updating OpenClaude
 
+**Via npm:**
 ```bash
 npm install -g @gitlawb/openclaude@latest
 ```
 
+**Via AUR:**
+```bash
+paru
+```
+*(Or use your preferred AUR helper like `yay -Syu`)*
+
 ## 7. Uninstalling OpenClaude
 
+**Via npm:**
 ```bash
 npm uninstall -g @gitlawb/openclaude
+```
+
+**Via AUR (Arch Linux):**
+```bash
+paru -Rns openclaude
 ```
 
 ## Need Advanced Setup?

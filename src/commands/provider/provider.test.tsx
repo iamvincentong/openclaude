@@ -1,8 +1,8 @@
 import { PassThrough } from 'node:stream'
 
-import { afterEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
-import stripAnsi from 'strip-ansi'
+import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
 import { createRoot, render, useApp } from '../../ink.js'
 import { AppStateProvider } from '../../state/AppState.js'
@@ -16,6 +16,10 @@ import {
   ProviderWizard,
   TextEntryDialog,
 } from './provider.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 import { createProfileFile } from '../../utils/providerProfile.js'
 
 const SYNC_START = '\x1B[?2026h'
@@ -156,31 +160,39 @@ function createTestStreams(): {
   }
 }
 
+beforeEach(async () => {
+  await acquireSharedMutationLock('commands/provider/provider.test.tsx')
+})
+
 afterEach(() => {
-  mock.restore()
+  try {
+    mock.restore()
 
-  if (ORIGINAL_SIMPLE_ENV === undefined) {
-    delete process.env.CLAUDE_CODE_SIMPLE
-  } else {
-    process.env.CLAUDE_CODE_SIMPLE = ORIGINAL_SIMPLE_ENV
-  }
+    if (ORIGINAL_SIMPLE_ENV === undefined) {
+      delete process.env.CLAUDE_CODE_SIMPLE
+    } else {
+      process.env.CLAUDE_CODE_SIMPLE = ORIGINAL_SIMPLE_ENV
+    }
 
-  if (ORIGINAL_CODEX_API_KEY === undefined) {
-    delete process.env.CODEX_API_KEY
-  } else {
-    process.env.CODEX_API_KEY = ORIGINAL_CODEX_API_KEY
-  }
+    if (ORIGINAL_CODEX_API_KEY === undefined) {
+      delete process.env.CODEX_API_KEY
+    } else {
+      process.env.CODEX_API_KEY = ORIGINAL_CODEX_API_KEY
+    }
 
-  if (ORIGINAL_CHATGPT_ACCOUNT_ID === undefined) {
-    delete process.env.CHATGPT_ACCOUNT_ID
-  } else {
-    process.env.CHATGPT_ACCOUNT_ID = ORIGINAL_CHATGPT_ACCOUNT_ID
-  }
+    if (ORIGINAL_CHATGPT_ACCOUNT_ID === undefined) {
+      delete process.env.CHATGPT_ACCOUNT_ID
+    } else {
+      process.env.CHATGPT_ACCOUNT_ID = ORIGINAL_CHATGPT_ACCOUNT_ID
+    }
 
-  if (ORIGINAL_CODEX_ACCOUNT_ID === undefined) {
-    delete process.env.CODEX_ACCOUNT_ID
-  } else {
-    process.env.CODEX_ACCOUNT_ID = ORIGINAL_CODEX_ACCOUNT_ID
+    if (ORIGINAL_CODEX_ACCOUNT_ID === undefined) {
+      delete process.env.CODEX_ACCOUNT_ID
+    } else {
+      process.env.CODEX_ACCOUNT_ID = ORIGINAL_CODEX_ACCOUNT_ID
+    }
+  } finally {
+    releaseSharedMutationLock()
   }
 })
 
@@ -244,9 +256,9 @@ test('wizard step remount prevents a typed API key from leaking into the next fi
     </AppStateProvider>,
   )
 
-  await Bun.sleep(25)
+  await waitForOutput(getOutput, output => output.includes('API key step'))
   stdin.write('sk-secret-12345678')
-  await Bun.sleep(25)
+  await waitForOutput(getOutput, output => output.includes('********'))
 
   root.render(
     <AppStateProvider>
@@ -262,13 +274,14 @@ test('wizard step remount prevents a typed API key from leaking into the next fi
     </AppStateProvider>,
   )
 
-  await Bun.sleep(25)
+  const output = await waitForOutput(
+    getOutput,
+    frame => frame.includes('Model step') && !frame.includes('sk-secret-12345678'),
+  )
   root.unmount()
   stdin.end()
   stdout.end()
-  await Bun.sleep(25)
 
-  const output = stripAnsi(extractLastFrame(getOutput()))
   expect(output).toContain('Model step')
   expect(output).not.toContain('sk-secret-12345678')
 })
@@ -317,6 +330,52 @@ test('buildProfileSaveMessage maps provider fields without echoing secrets', () 
   expect(message).not.toContain('sk-secret-12345678')
 })
 
+test('buildProfileSaveMessage reports pooled OpenAI credentials as configured', () => {
+  const message = buildProfileSaveMessage(
+    'openai',
+    {
+      OPENAI_API_KEYS: 'sk-secret-a,sk-secret-b',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    },
+    'D:/codings/Opensource/openclaude/.openclaude-profile.json',
+  )
+
+  expect(message).toContain('Saved OpenAI profile.')
+  expect(message).toContain('Credentials: configured')
+  expect(message).not.toContain('sk-secret-a')
+  expect(message).not.toContain('sk-secret-b')
+})
+test('buildProfileSaveMessage redacts individual pooled OpenAI credentials in display fields', () => {
+  const message = buildProfileSaveMessage(
+    'openai',
+    {
+      OPENAI_API_KEYS: 'lowercasecredentialaaaaaaaaaaaa,lowercasecredentialbbbbbbbbbbbb',
+      OPENAI_MODEL: 'lowercasecredentialaaaaaaaaaaaa',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    },
+    'D:/codings/Opensource/openclaude/.openclaude-profile.json',
+  )
+
+  expect(message).toContain('Saved OpenAI profile.')
+  expect(message).not.toContain('lowercasecredentialaaaaaaaaaaaa')
+  expect(message).not.toContain('lowercasecredentialbbbbbbbbbbbb')
+  expect(message).toContain('Model: low...aaa')
+})
+test('buildProfileSaveMessage ignores delimiter-only pooled OpenAI credentials', () => {
+  const message = buildProfileSaveMessage(
+    'openai',
+    {
+      OPENAI_API_KEYS: ', ,',
+      OPENAI_MODEL: 'gpt-4o',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+    },
+    'D:/codings/Opensource/openclaude/.openclaude-profile.json',
+  )
+
+  expect(message).toContain('Saved OpenAI profile.')
+  expect(message).not.toContain('Credentials: configured')
+})
 test('buildProfileSaveMessage labels local openai-compatible profiles consistently', () => {
   const message = buildProfileSaveMessage(
     'openai',
@@ -348,6 +407,25 @@ test('buildProfileSaveMessage labels descriptor-backed gateway profiles consiste
   expect(message).toContain('Endpoint: https://openrouter.ai/api/v1')
   expect(message).toContain('Credentials: configured')
   expect(message).not.toContain('sk-secret-12345678')
+})
+
+test('buildProfileSaveMessage labels descriptor-backed Venice profiles consistently', () => {
+  const message = buildProfileSaveMessage(
+    'openai',
+    {
+      OPENAI_API_KEY: 'sk-venice-secret-12345678',
+      VENICE_API_KEY: 'sk-venice-secret-12345678',
+      OPENAI_MODEL: 'venice-uncensored',
+      OPENAI_BASE_URL: 'https://api.venice.ai/api/v1',
+    },
+    'D:/codings/Opensource/openclaude/.openclaude-profile.json',
+  )
+
+  expect(message).toContain('Saved Venice profile.')
+  expect(message).toContain('Model: venice-uncensored')
+  expect(message).toContain('Endpoint: https://api.venice.ai/api/v1')
+  expect(message).toContain('Credentials: configured')
+  expect(message).not.toContain('sk-venice-secret-12345678')
 })
 
 test('buildProfileSaveMessage describes Gemini access token / ADC mode clearly', () => {
@@ -571,6 +649,22 @@ test('buildCurrentProviderSummary recognizes descriptor-backed openai-compatible
   expect(summary.providerLabel).toBe('OpenRouter')
   expect(summary.modelLabel).toBe('openai/gpt-5-mini')
   expect(summary.endpointLabel).toBe('https://openrouter.ai/api/v1')
+})
+
+test('buildCurrentProviderSummary recognizes Venice routes', () => {
+  const summary = buildCurrentProviderSummary({
+    processEnv: {
+      CLAUDE_CODE_USE_OPENAI: '1',
+      OPENAI_MODEL: 'venice-uncensored',
+      OPENAI_BASE_URL: 'https://api.venice.ai/api/v1',
+      VENICE_API_KEY: 'sk-venice-secret',
+    },
+    persisted: null,
+  })
+
+  expect(summary.providerLabel).toBe('Venice')
+  expect(summary.modelLabel).toBe('venice-uncensored')
+  expect(summary.endpointLabel).toBe('https://api.venice.ai/api/v1')
 })
 
 test('buildCurrentProviderSummary does not relabel local gpt-5.4 providers as Codex when custom base URL is set', () => {

@@ -1,17 +1,35 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock.js'
+import * as actualGrowthbook from '../services/analytics/growthbook.js'
 
 async function importFileModuleWithKillswitchEnabled(
   killswitchEnabled: boolean,
 ) {
+  const realGrowthbook = await import(
+    `../services/analytics/growthbook.js?real=${Date.now()}-${Math.random()}`
+  )
   mock.module('../services/analytics/growthbook.js', () => ({
+    ...realGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE: () => killswitchEnabled,
   }))
 
   return import(`./file.js?ts=${Date.now()}-${Math.random()}`)
 }
 
-afterEach(() => {
-  mock.restore()
+beforeAll(async () => {
+  await acquireSharedMutationLock('utils/file.test.ts')
+})
+
+afterAll(() => {
+  try {
+    mock.restore()
+    mock.module('../services/analytics/growthbook.js', () => actualGrowthbook)
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 describe('addLineNumbers', () => {

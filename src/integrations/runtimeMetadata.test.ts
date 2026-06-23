@@ -1,0 +1,306 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { describe, it, expect } from 'bun:test'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock'
+import {
+  resolveModelRuntimeLimits,
+  resolveOpenAIShimRuntimeContext,
+} from '../integrations/runtimeMetadata'
+import { setCachedModels } from './discoveryCache'
+import { getDiscoveryCacheKey } from './discoveryService'
+
+const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
+
+async function withTempConfigDir<T>(fn: () => Promise<T>): Promise<T> {
+  await acquireSharedMutationLock('integrations/runtimeMetadata.test.ts')
+  let tempDir: string | null = null
+  try {
+    tempDir = mkdtempSync(join(tmpdir(), 'openclaude-runtime-metadata-test-'))
+    process.env.CLAUDE_CONFIG_DIR = tempDir
+    return await fn()
+  } finally {
+    try {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir
+      }
+      if (tempDir) {
+        rmSync(tempDir, { recursive: true, force: true })
+      }
+    } finally {
+      releaseSharedMutationLock()
+    }
+  }
+}
+
+describe('resolveModelRuntimeLimits', () => {
+  it('uses discovered custom route context windows from the discovery cache', async () => {
+    await withTempConfigDir(async () => {
+      const baseUrl = 'http://localhost:4000/v1'
+      await setCachedModels(
+        getDiscoveryCacheKey('custom', {
+          baseUrl,
+        }),
+        {
+          models: [
+            {
+              id: 'litellm-proxy',
+              apiName: 'litellm-proxy',
+              label: 'litellm-proxy',
+              contextWindow: 1_000_000,
+            },
+          ],
+        },
+      )
+
+      expect(
+        resolveModelRuntimeLimits({
+          model: 'litellm-proxy',
+          processEnv: {
+            CLAUDE_CODE_USE_OPENAI: '1',
+            OPENAI_BASE_URL: baseUrl,
+          },
+        }).contextWindow,
+      ).toBe(1_000_000)
+    })
+  })
+  it('uses built-in Z.AI GLM-5.2 runtime limits', () => {
+    const limits = resolveModelRuntimeLimits({
+      model: 'glm-5.2',
+      processEnv: {
+        OPENAI_BASE_URL: 'https://api.z.ai/api/coding/paas/v4',
+      },
+    })
+
+    expect(limits.contextWindow).toBe(1_000_000)
+    expect(limits.maxOutputTokens).toBe(131_072)
+  })
+  it('uses the applied provider profile route before generic custom base URL fallback', () => {
+    const limits = resolveModelRuntimeLimits({
+      model: 'kimi-k2.6',
+      activeProfileProvider: 'opencode',
+      processEnv: {
+        CLAUDE_CODE_USE_OPENAI: '1',
+        CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED: '1',
+        OPENAI_BASE_URL: 'https://proxy.example.test/v1',
+      },
+    })
+
+    expect(limits.contextWindow).toBe(262_144)
+    expect(limits.maxOutputTokens).toBe(65_536)
+  })
+
+  it('preserves composite provider paths before generic last-segment fallbacks', () => {
+    for (const model of [
+      'openrouter/accounts/fireworks/models/deepseek-v4-pro',
+      'openrouter/fireworks/models/deepseek-v4-pro',
+    ]) {
+      expect(
+        resolveModelRuntimeLimits({
+          model,
+          processEnv: {
+            CLAUDE_CODE_USE_OPENAI: '1',
+            OPENAI_BASE_URL: 'https://openrouter.ai/api/v1',
+          },
+        }).maxOutputTokens,
+      ).toBe(32_768)
+    }
+
+    for (const model of [
+      'openrouter/accounts/fireworks/models/llama-v3p1-70b-instruct',
+      'openrouter/fireworks/models/llama-v3p1-70b-instruct',
+    ]) {
+      expect(
+        resolveModelRuntimeLimits({
+          model,
+          processEnv: {
+            CLAUDE_CODE_USE_OPENAI: '1',
+            OPENAI_BASE_URL: 'https://openrouter.ai/api/v1',
+          },
+        }).contextWindow,
+      ).toBe(131_072)
+    }
+  })
+
+
+  it('uses pooled OpenAI fallback credentials when reading discovered runtime limits', async () => {
+    await withTempConfigDir(async () => {
+      const baseUrl = 'http://localhost:4000/v1'
+      await setCachedModels(
+        getDiscoveryCacheKey('custom', {
+          baseUrl,
+          apiKey: 'key-a',
+        }),
+        {
+          models: [
+            {
+              id: 'pooled-litellm-proxy',
+              apiName: 'pooled-litellm-proxy',
+              label: 'pooled-litellm-proxy',
+              contextWindow: 2_000_000,
+            },
+          ],
+        },
+      )
+
+      expect(
+        resolveModelRuntimeLimits({
+          model: 'pooled-litellm-proxy',
+          processEnv: {
+            CLAUDE_CODE_USE_OPENAI: '1',
+            OPENAI_BASE_URL: baseUrl,
+            OPENAI_API_KEYS: 'key-a,key-b',
+          },
+        }).contextWindow,
+      ).toBe(2_000_000)
+    })
+  })
+})
+
+describe('resolveOpenAIShimRuntimeContext - Z.AI GLM-5.2', () => {
+  it.each([
+    'glm-5.2',
+    'glm-5.2?reasoning=high',
+    'glm-5.2?thinking=disabled',
+  ])('uses Z.AI GLM-5.2 shim settings for %s', model => {
+    const result = resolveOpenAIShimRuntimeContext({
+      model,
+      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+      processEnv: {},
+    })
+
+    expect(result.routeId).toBe('zai')
+    expect(result.catalogEntry?.id).toBe('glm-5.2')
+    expect(result.openaiShimConfig.thinkingRequestFormat).toBe('zai-compatible')
+    expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    expect(result.openaiShimConfig.requireReasoningContentOnAssistantMessages).toBe(true)
+    expect(result.openaiShimConfig.enableToolStreaming).toBe(true)
+  })
+})
+
+describe('resolveOpenAIShimRuntimeContext - segment-boundary heuristic', () => {
+  describe('DeepSeek models', () => {
+    it('should NOT infer preserveReasoningContent for custom aliases (false-positive case)', () => {
+      // my-deepseek-rag is a custom alias, NOT a provider path
+      // Should NOT trigger the DeepSeek detection
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'my-deepseek-rag',
+      })
+      // Custom aliases should NOT get preserveReasoningContent
+      expect(result.openaiShimConfig.preserveReasoningContent).toBeUndefined()
+    })
+
+    it('should infer preserveReasoningContent for openrouter/deepseek/... paths (true-positive case)', () => {
+      // openrouter/deepseek/deepseek-chat is a provider path with segments
+      // Should trigger the DeepSeek detection
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'openrouter/deepseek/deepseek-chat',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+      expect(result.openaiShimConfig.reasoningContentFallback).toBe('')
+    })
+
+    it('should infer preserveReasoningContent for accounts/fireworks/... paths (true-positive case)', () => {
+      // accounts/fireworks/models/deepseek-v3 is a provider path with multiple segments
+      // Should trigger the DeepSeek detection
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'accounts/fireworks/models/deepseek-v3',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+      expect(result.openaiShimConfig.reasoningContentFallback).toBe('')
+    })
+
+    it('should infer preserveReasoningContent for deepseek-chat directly (standard case)', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'deepseek-chat',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    })
+
+    it('should infer preserveReasoningContent for deepseek-coder (model name)', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'deepseek-coder',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    })
+  })
+
+  describe('Kimi/Moonshot models', () => {
+    it('should NOT infer preserveReasoningContent for custom kimi aliases', () => {
+      // Custom alias should not trigger
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'my-kimi-assistant',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBeUndefined()
+    })
+
+    it('should infer preserveReasoningContent for moonshot AI paths', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'openrouter/moonshotai/moonshot-v1-8k',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    })
+
+    it('should infer preserveReasoningContent for direct moonshot model names', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'moonshot-v1-8k',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBe(true)
+    })
+  })
+
+  describe('Non-matching models', () => {
+    it('should return undefined for gpt-4o (negative case)', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'gpt-4o',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBeUndefined()
+    })
+
+    it('should return undefined for claude models (negative case)', () => {
+      const result = resolveOpenAIShimRuntimeContext({
+        processEnv: {},
+        model: 'claude-sonnet-4-20250514',
+      })
+      expect(result.openaiShimConfig.preserveReasoningContent).toBeUndefined()
+    })
+  })
+  it('matches provider-prefixed model ids to built-in runtime limits', () => {
+    expect(
+      resolveModelRuntimeLimits({
+        model: 'google/gemini-3.1-pro',
+        activeProfileProvider: 'custom',
+        processEnv: {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://example-gateway.test/v1',
+        },
+      }).contextWindow,
+    ).toBe(1_048_576)
+
+    expect(
+      resolveModelRuntimeLimits({
+        model: 'moonshotai/kimi-k2.6',
+        activeProfileProvider: 'nvidia-nim',
+        processEnv: {
+          CLAUDE_CODE_USE_OPENAI: '1',
+          OPENAI_BASE_URL: 'https://integrate.api.nvidia.com/v1',
+        },
+      }).contextWindow,
+    ).toBe(262_144)
+  })
+})

@@ -18,14 +18,21 @@
  */
 import { PassThrough } from 'node:stream'
 
-import { afterEach, expect, mock, test } from 'bun:test'
+import { afterAll, expect, mock, test } from 'bun:test'
 import React, { useEffect } from 'react'
-import stripAnsi from 'strip-ansi'
+import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
 import { createRoot, Text, useTheme } from '../../ink.js'
 import { KeybindingSetup } from '../../keybindings/KeybindingProviderSetup.js'
 import { AppStateProvider } from '../../state/AppState.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
+import type { ThemeSetting } from '../../utils/theme.js'
 import { ThemeProvider, usePreviewTheme } from './ThemeProvider.js'
+
+await acquireSharedMutationLock('components/design-system/ThemeProvider.test.tsx')
 
 mock.module('../StructuredDiff.js', () => ({
   StructuredDiff: function StructuredDiffPreview(): React.ReactNode {
@@ -98,8 +105,12 @@ async function waitForFrame(
   return frame
 }
 
-afterEach(() => {
-  mock.restore()
+afterAll(() => {
+  try {
+    mock.restore()
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 /**
@@ -123,7 +134,7 @@ test('useTheme() reflects updated currentTheme after setThemeSetting call', asyn
     return <Text>current:{theme}</Text>
   }
 
-  let setThemeFn: ((s: string) => void) | null = null
+  let setThemeFn: ((s: ThemeSetting) => void) | null = null
   function ThemeSetter() {
     const [, setter] = useTheme()
     useEffect(() => { setThemeFn = setter })
@@ -151,8 +162,10 @@ test('useTheme() reflects updated currentTheme after setThemeSetting call', asyn
     const afterLight = await waitForFrame(getOutput, f => f.includes('current:light'))
     expect(afterLight).toContain('current:light')
 
-    // Change again to confirm no stale caching
-    setThemeFn!('ansi')
+    // Change again to confirm no stale caching. 'ansi' is not a declared
+    // ThemeSetting; the provider stores it verbatim, which is exactly what
+    // this staleness check needs — cast at the boundary.
+    setThemeFn!('ansi' as ThemeSetting)
     const afterAnsi = await waitForFrame(getOutput, f => f.includes('current:ansi'))
     expect(afterAnsi).toContain('current:ansi')
   } finally {

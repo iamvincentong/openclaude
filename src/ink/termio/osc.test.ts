@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { join } from 'node:path'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 
 const originalEnv = { ...process.env }
 const originalPlatform = process.platform
@@ -7,8 +11,14 @@ const mockedClipboardPath = join(process.cwd(), 'openclaude-clipboard.txt')
 
 const generateTempFilePathMock = mock(() => mockedClipboardPath)
 
+// Mirrors the execFileNoThrow/execFileNoThrowWithCwd signature so that
+// recorded calls keep usable tuple types ([file, args, options]).
 const execFileNoThrowMock = mock(
-  async () => ({ code: 0, stdout: '', stderr: '' }),
+  async (
+    _file: string,
+    _args: string[],
+    _options?: Record<string, unknown>,
+  ) => ({ code: 0, stdout: '', stderr: '' }),
 )
 
 function installOscMocks(): void {
@@ -46,7 +56,8 @@ async function waitForExecCall(
 }
 
 describe('Windows clipboard fallback', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await acquireSharedMutationLock('ink/termio/osc.test.ts')
     installOscMocks()
     execFileNoThrowMock.mockClear()
     generateTempFilePathMock.mockClear()
@@ -57,8 +68,13 @@ describe('Windows clipboard fallback', () => {
   })
 
   afterEach(() => {
-    process.env = { ...originalEnv }
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    try {
+      mock.restore()
+      process.env = { ...originalEnv }
+      Object.defineProperty(process, 'platform', { value: originalPlatform })
+    } finally {
+      releaseSharedMutationLock()
+    }
   })
 
   test('uses PowerShell instead of clip.exe for local Windows copy', async () => {
@@ -97,7 +113,8 @@ describe('Windows clipboard fallback', () => {
 })
 
 describe('clipboard path behavior remains stable', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await acquireSharedMutationLock('ink/termio/osc.test.ts')
     installOscMocks()
     execFileNoThrowMock.mockClear()
     process.env = { ...originalEnv }
@@ -106,8 +123,13 @@ describe('clipboard path behavior remains stable', () => {
   })
 
   afterEach(() => {
-    process.env = { ...originalEnv }
-    Object.defineProperty(process, 'platform', { value: originalPlatform })
+    try {
+      mock.restore()
+      process.env = { ...originalEnv }
+      Object.defineProperty(process, 'platform', { value: originalPlatform })
+    } finally {
+      releaseSharedMutationLock()
+    }
   })
 
   test('getClipboardPath stays native on local macOS', async () => {

@@ -1,4 +1,8 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
 
 import {
   DEFAULT_GITHUB_DEVICE_SCOPE,
@@ -12,8 +16,37 @@ async function importFreshModule() {
   return import(`./deviceFlow.ts?ts=${Date.now()}-${Math.random()}`)
 }
 
+beforeEach(async () => {
+  await acquireSharedMutationLock('services/github/deviceFlow.test.ts')
+})
+
 afterEach(() => {
-  mock.restore()
+  try {
+    mock.restore()
+  } finally {
+    releaseSharedMutationLock()
+  }
+})
+
+describe('GitHub Enterprise auth endpoints', () => {
+  test('normalize path-bearing Enterprise URLs to the instance origin', async () => {
+    const {
+      getGithubEnterpriseAccessTokenUrl,
+      getGithubEnterpriseCopilotTokenUrl,
+      getGithubEnterpriseDeviceCodeUrl,
+    } = await importFreshModule()
+    const gheUrl = 'https://github.mycompany.com/api/copilot/'
+
+    expect(getGithubEnterpriseDeviceCodeUrl(gheUrl)).toBe(
+      'https://github.mycompany.com/login/device/code',
+    )
+    expect(getGithubEnterpriseAccessTokenUrl(gheUrl)).toBe(
+      'https://github.mycompany.com/login/oauth/access_token',
+    )
+    expect(getGithubEnterpriseCopilotTokenUrl(gheUrl)).toBe(
+      'https://github.mycompany.com/api/copilot_internal/v2/token',
+    )
+  })
 })
 
 describe('requestDeviceCode', () => {
@@ -44,6 +77,34 @@ describe('requestDeviceCode', () => {
     expect(r.verification_uri).toBe('https://github.com/login/device')
     expect(r.expires_in).toBe(600)
     expect(r.interval).toBe(5)
+  })
+
+  test('uses normalized Enterprise endpoint when gheUrl is provided', async () => {
+    const { requestDeviceCode } = await importFreshModule()
+    let capturedUrl = ''
+    const fetchImpl = mock((url: RequestInfo | URL) => {
+      capturedUrl = String(url)
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            device_code: 'abc',
+            user_code: 'ABCD-1234',
+            verification_uri: 'https://github.mycompany.com/login/device',
+          }),
+          { status: 200 },
+        ),
+      )
+    })
+
+    await requestDeviceCode({
+      clientId: 'test-client',
+      fetchImpl,
+      gheUrl: 'https://github.mycompany.com/api/copilot/',
+    })
+
+    expect(capturedUrl).toBe(
+      'https://github.mycompany.com/login/device/code',
+    )
   })
 
   test('throws on HTTP error', async () => {

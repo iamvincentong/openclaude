@@ -1,12 +1,34 @@
-import { afterEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveRuntimeCodexCredentials } from './providerConfig.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
+
+type ProviderConfigModule = typeof import('./providerConfig.js')
+
+function importFreshProviderConfig(
+  cacheKey: string,
+): Promise<ProviderConfigModule> {
+  return import(
+    `./providerConfig.js?${cacheKey}`
+  ) as Promise<ProviderConfigModule>
+}
+
+beforeEach(async () => {
+  await acquireSharedMutationLock('services/api/providerConfig.runtimeCodexCredentials.test.ts')
+})
 
 afterEach(() => {
-  mock.restore()
+  try {
+    mock.restore()
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 function makeJwt(payload: Record<string, unknown>): string {
@@ -87,9 +109,8 @@ test('runtime credential resolution avoids sync secure-storage reads when async 
     },
   }))
 
-  // @ts-expect-error cache-busting query string for Bun module mocks
-  const { resolveRuntimeCodexCredentials } = await import(
-    './providerConfig.js?runtime-no-sync-secure-storage'
+  const { resolveRuntimeCodexCredentials } = await importFreshProviderConfig(
+    'runtime-no-sync-secure-storage',
   )
 
   const credentials = resolveRuntimeCodexCredentials({

@@ -8,21 +8,25 @@
 import { isLocalProviderUrl, resolveProviderRequest } from '../services/api/providerConfig.js'
 import {
   getRouteLabel,
+  isMiniMaxBaseUrl,
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 import { getLocalOpenAICompatibleProviderLabel } from '../utils/providerDiscovery.js'
 import { getSettings_DEPRECATED } from '../utils/settings/settings.js'
 import { parseUserSpecifiedModel } from '../utils/model/model.js'
 import { DEFAULT_GEMINI_MODEL } from '../utils/providerProfile.js'
+import { BRAND_TAGLINE } from '../constants/brand.js'
+import { getGlobalConfig } from '../utils/config.js'
+import { ANSI_DIM, ANSI_RESET, ansiRgb } from '../utils/terminalAnsi.js'
+import {
+  resolveLogoPalette,
+  type RGB,
+} from './StartupScreen.palettes.js'
 
 declare const MACRO: { VERSION: string; DISPLAY_VERSION?: string }
 
-const ESC = '\x1b['
-const RESET = `${ESC}0m`
-const DIM = `${ESC}2m`
-
-type RGB = [number, number, number]
-const rgb = (r: number, g: number, b: number) => `${ESC}38;2;${r};${g};${b}m`
+const RESET = ANSI_RESET
+const DIM = ANSI_DIM
 
 function lerp(a: RGB, b: RGB, t: number): RGB {
   return [
@@ -32,7 +36,7 @@ function lerp(a: RGB, b: RGB, t: number): RGB {
   ]
 }
 
-function gradAt(stops: RGB[], t: number): RGB {
+function gradAt(stops: readonly RGB[], t: number): RGB {
   const c = Math.max(0, Math.min(1, t))
   const s = c * (stops.length - 1)
   const i = Math.floor(s)
@@ -40,31 +44,15 @@ function gradAt(stops: RGB[], t: number): RGB {
   return lerp(stops[i], stops[i + 1], s - i)
 }
 
-function paintLine(text: string, stops: RGB[], lineT: number): string {
+export function paintLine(text: string, stops: readonly RGB[], lineT: number): string {
   let out = ''
   for (let i = 0; i < text.length; i++) {
     const t = text.length > 1 ? lineT * 0.5 + (i / (text.length - 1)) * 0.5 : lineT
     const [r, g, b] = gradAt(stops, t)
-    out += `${rgb(r, g, b)}${text[i]}`
+    out += `${ansiRgb(r, g, b)}${text[i]}`
   }
   return out + RESET
 }
-
-// ─── Colors ───────────────────────────────────────────────────────────────────
-
-const SUNSET_GRAD: RGB[] = [
-  [255, 180, 100],
-  [240, 140, 80],
-  [217, 119, 87],
-  [193, 95, 60],
-  [160, 75, 55],
-  [130, 60, 50],
-]
-
-const ACCENT: RGB = [240, 148, 100]
-const CREAM: RGB = [220, 195, 170]
-const DIMCOL: RGB = [120, 100, 82]
-const BORDER: RGB = [100, 80, 65]
 
 // ─── Filled Block Text Logo ───────────────────────────────────────────────────
 
@@ -146,6 +134,7 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
     else if (/moonshot/i.test(baseUrl)) name = 'Moonshot AI - API'
     else if (/deepseek/i.test(baseUrl)) name = 'DeepSeek'
     else if (/mistral/i.test(baseUrl)) name = 'Mistral'
+    else if (/atlascloud/i.test(baseUrl)) name = 'Atlas Cloud'
     // rawModel fallback — fires only when base URL is generic/custom.
     else if (/nvidia/i.test(rawModel)) name = 'NVIDIA NIM'
     else if (/minimax/i.test(rawModel)) name = 'MiniMax'
@@ -158,6 +147,7 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
     else if (/llama/i.test(rawModel)) name = 'Meta Llama'
     else if (/bankr/i.test(baseUrl)) name = 'Bankr'
     else if (/bankr/i.test(rawModel)) name = 'Bankr'
+    else if (/atlas\.cloud/i.test(rawModel)) name = 'Atlas Cloud'
     else if (isLocal) name = getLocalOpenAICompatibleProviderLabel(baseUrl)
     
     // Resolve model alias to actual model name + reasoning effort
@@ -175,14 +165,15 @@ export function detectProvider(modelOverride?: string): { name: string; model: s
   const resolvedModel = parseUserSpecifiedModel(modelSetting)
   const baseUrl = process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com'
   const isLocal = isLocalProviderUrl(baseUrl)
-  return { name: 'Anthropic', model: resolvedModel, baseUrl, isLocal }
+  const name = isMiniMaxBaseUrl(baseUrl) ? 'MiniMax' : 'Anthropic'
+  return { name, model: resolvedModel, baseUrl, isLocal }
 }
 
 // ─── Box drawing ──────────────────────────────────────────────────────────────
 
-function boxRow(content: string, width: number, rawLen: number): string {
+function boxRow(content: string, width: number, rawLen: number, border: RGB): string {
   const pad = Math.max(0, width - 2 - rawLen)
-  return `${rgb(...BORDER)}\u2502${RESET}${content}${' '.repeat(pad)}${rgb(...BORDER)}\u2502${RESET}`
+  return `${ansiRgb(...border)}\u2502${RESET}${content}${' '.repeat(pad)}${ansiRgb(...border)}\u2502${RESET}`
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -190,6 +181,13 @@ function boxRow(content: string, width: number, rawLen: number): string {
 export function printStartupScreen(modelOverride?: string): void {
   // Skip in non-interactive / CI / print mode
   if (process.env.CI || !process.stdout.isTTY) return
+
+  const palette = resolveLogoPalette(getGlobalConfig().logoColor)
+  const ACCENT = palette.accent
+  const CREAM = palette.cream
+  const DIMCOL = palette.dim
+  const BORDER = palette.border
+  const GRAD = palette.gradient
 
   const p = detectProvider(modelOverride)
   const W = 62
@@ -205,43 +203,43 @@ export function printStartupScreen(modelOverride?: string): void {
     if (allLogo[i] === '') {
       out.push('')
     } else {
-      out.push(paintLine(allLogo[i], SUNSET_GRAD, t))
+      out.push(paintLine(allLogo[i], GRAD, t))
     }
   }
 
   out.push('')
 
   // Tagline
-  out.push(`  ${rgb(...ACCENT)}\u2726${RESET} ${rgb(...CREAM)}Any model. Every tool. Zero limits.${RESET} ${rgb(...ACCENT)}\u2726${RESET}`)
+  out.push(`  ${ansiRgb(...ACCENT)}\u2726${RESET} ${ansiRgb(...CREAM)}${BRAND_TAGLINE}${RESET} ${ansiRgb(...ACCENT)}\u2726${RESET}`)
   out.push('')
 
   // Provider info box
-  out.push(`${rgb(...BORDER)}\u2554${'\u2550'.repeat(W - 2)}\u2557${RESET}`)
+  out.push(`${ansiRgb(...BORDER)}\u2554${'\u2550'.repeat(W - 2)}\u2557${RESET}`)
 
   const lbl = (k: string, v: string, c: RGB = CREAM): [string, number] => {
     const padK = k.padEnd(9)
-    return [` ${DIM}${rgb(...DIMCOL)}${padK}${RESET} ${rgb(...c)}${v}${RESET}`, ` ${padK} ${v}`.length]
+    return [` ${DIM}${ansiRgb(...DIMCOL)}${padK}${RESET} ${ansiRgb(...c)}${v}${RESET}`, ` ${padK} ${v}`.length]
   }
 
   const provC: RGB = p.isLocal ? [130, 175, 130] : ACCENT
   let [r, l] = lbl('Provider', p.name, provC)
-  out.push(boxRow(r, W, l))
+  out.push(boxRow(r, W, l, BORDER))
   ;[r, l] = lbl('Model', p.model)
-  out.push(boxRow(r, W, l))
+  out.push(boxRow(r, W, l, BORDER))
   const ep = p.baseUrl.length > 38 ? p.baseUrl.slice(0, 35) + '...' : p.baseUrl
   ;[r, l] = lbl('Endpoint', ep)
-  out.push(boxRow(r, W, l))
+  out.push(boxRow(r, W, l, BORDER))
 
-  out.push(`${rgb(...BORDER)}\u2560${'\u2550'.repeat(W - 2)}\u2563${RESET}`)
+  out.push(`${ansiRgb(...BORDER)}\u2560${'\u2550'.repeat(W - 2)}\u2563${RESET}`)
 
   const sC: RGB = p.isLocal ? [130, 175, 130] : ACCENT
   const sL = p.isLocal ? 'local' : 'cloud'
-  const sRow = ` ${rgb(...sC)}\u25cf${RESET} ${DIM}${rgb(...DIMCOL)}${sL}${RESET}    ${DIM}${rgb(...DIMCOL)}Ready \u2014 type ${RESET}${rgb(...ACCENT)}/help${RESET}${DIM}${rgb(...DIMCOL)} to begin${RESET}`
+  const sRow = ` ${ansiRgb(...sC)}\u25cf${RESET} ${DIM}${ansiRgb(...DIMCOL)}${sL}${RESET}    ${DIM}${ansiRgb(...DIMCOL)}Ready \u2014 type ${RESET}${ansiRgb(...ACCENT)}/help${RESET}${DIM}${ansiRgb(...DIMCOL)} to begin${RESET}`
   const sLen = ` \u25cf ${sL}    Ready \u2014 type /help to begin`.length
-  out.push(boxRow(sRow, W, sLen))
+  out.push(boxRow(sRow, W, sLen, BORDER))
 
-  out.push(`${rgb(...BORDER)}\u255a${'\u2550'.repeat(W - 2)}\u255d${RESET}`)
-  out.push(`  ${DIM}${rgb(...DIMCOL)}openclaude ${RESET}${rgb(...ACCENT)}v${MACRO.DISPLAY_VERSION ?? MACRO.VERSION}${RESET}`)
+  out.push(`${ansiRgb(...BORDER)}\u255a${'\u2550'.repeat(W - 2)}\u255d${RESET}`)
+  out.push(`  ${DIM}${ansiRgb(...DIMCOL)}openclaude ${RESET}${ansiRgb(...ACCENT)}v${MACRO.DISPLAY_VERSION ?? MACRO.VERSION}${RESET}`)
   out.push('')
 
   process.stdout.write(out.join('\n') + '\n')

@@ -25,7 +25,10 @@ import {
 } from './fileHistory.js'
 import { logError } from './log.js'
 import { getAPIProvider } from './model/providers.js'
-import { usesAnthropicNativeMessageFormat } from '../integrations/runtimeMetadata.js'
+import {
+  resolveOpenAIShimRuntimeContext,
+  usesAnthropicNativeMessageFormat,
+} from '../integrations/runtimeMetadata.js'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -51,6 +54,7 @@ import {
 } from './sessionStorage.js'
 import { jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
+import { isDangerousPermissionMode } from './permissions/PermissionMode.js'
 
 // Dead code elimination: internal-only tool names are conditionally required so
 // their strings don't leak into external builds. Static imports always bundle.
@@ -78,6 +82,8 @@ const SEND_USER_FILE_TOOL_NAME: string | null = feature('KAIROS')
 // resume bounded well below the multi-GB failure mode we saw while leaving
 // enough room for normal compacted sessions plus resume hook context.
 const MAX_RESUME_MESSAGE_BYTES = 8 * 1024 * 1024
+
+type PrResumeSelector = true | number | string
 
 export class ResumeTranscriptTooLargeError extends Error {
   constructor(
@@ -198,6 +204,59 @@ function stripThinkingBlocks(messages: NormalizedMessage[]): NormalizedMessage[]
   }, [])
 }
 
+// Some 3P providers require `reasoning_content` echoed back on assistant
+// messages (DeepSeek thinking mode, Moonshot/Kimi, Z.AI GLM, MiMo, etc.). The
+// openai-shim re-shapes those messages and reads the source-of-truth from the
+// `thinking` block on the Anthropic side. Stripping the block leaves the shim
+// with no reasoning text and the provider 400s with
+// "reasoning_content in the thinking mode must be passed back" (issue #957).
+//
+// Vendors declare this need via `openaiShim.preserveReasoningContent: true`
+// in their descriptor, so derive the answer from the resolved shim config
+// instead of hardcoding model name prefixes — that automatically covers any
+// future vendor that opts in without code changes here.
+function shouldPreserveThinkingBlocksForProviderReplay(): boolean {
+  return (
+    resolveOpenAIShimRuntimeContext({
+      processEnv: process.env,
+      baseUrl: process.env.OPENAI_BASE_URL,
+      model: process.env.OPENAI_MODEL,
+    }).openaiShimConfig.preserveReasoningContent === true
+  )
+}
+
+function parsePrIdentifier(value: string): number | null {
+  const directNumber = parseInt(value, 10)
+  if (!isNaN(directNumber) && directNumber > 0) {
+    return directNumber
+  }
+  const urlMatch = value.match(/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/)
+  if (urlMatch?.[1]) {
+    return parseInt(urlMatch[1], 10)
+  }
+  return null
+}
+
+export function findResumeLogByPrSelector(
+  logs: LogOption[],
+  selector: PrResumeSelector,
+): LogOption | null {
+  const candidates = logs.filter(log => !log.isSidechain)
+  if (selector === true) {
+    return candidates.find(log => log.prNumber !== undefined) ?? null
+  }
+  if (typeof selector === 'number') {
+    return candidates.find(log => log.prNumber === selector) ?? null
+  }
+
+  const prNumber = parsePrIdentifier(selector)
+  if (prNumber !== null) {
+    return candidates.find(log => log.prNumber === prNumber) ?? null
+  }
+
+  return null
+}
+
 /**
  * Deserializes messages from a log file into the format expected by the REPL.
  * Filters unresolved tool uses, orphaned thinking messages, and appends a
@@ -223,14 +282,16 @@ export function deserializeMessagesWithInterruptDetection(
       migrateLegacyAttachmentTypes,
     )
 
-    // Strip invalid permissionMode values from deserialized user messages.
-    // The field is unvalidated JSON from disk and may contain modes from a different build.
+    // Strip invalid or dangerous permissionMode values from deserialized user
+    // messages. The field is unvalidated JSON from disk and only
+    // non-dangerous modes are eligible for rewind restoration.
     const validModes = new Set<string>(PERMISSION_MODES)
     for (const msg of migratedMessages) {
       if (
         msg.type === 'user' &&
         msg.permissionMode !== undefined &&
-        !validModes.has(msg.permissionMode)
+        (!validModes.has(msg.permissionMode) ||
+          isDangerousPermissionMode(msg.permissionMode))
       ) {
         msg.permissionMode = undefined
       }
@@ -251,17 +312,29 @@ export function deserializeMessagesWithInterruptDetection(
     // Strip thinking/redacted_thinking content blocks from assistant messages
     // when resuming against a 3P provider. These Anthropic-specific blocks cause
     // 400 errors or context corruption on OpenAI-compatible providers (issue #248 finding 5).
+    //
+    // Exception: providers that require `reasoning_content` echoed back on
+    // assistant messages (DeepSeek thinking mode, Moonshot/Kimi, Z.AI GLM, etc.)
+    // read the source-of-truth from the `thinking` block when re-shaping the
+    // outgoing OpenAI-format message. Stripping the block leaves the shim with
+    // no reasoning text to attach, and the provider 400s with
+    // "reasoning_content in the thinking mode must be passed back" (issue #957).
     const provider = getAPIProvider()
     const isAnthropicNativeTransport = usesAnthropicNativeMessageFormat({
       processEnv: process.env,
       model: process.env.OPENAI_MODEL,
-      providerCategory: provider,
+      // runtimeMetadata's inline providerCategory union predates the newer
+      // 'xai'/'xiaomi-mimo' categories; they take the same third-party path.
+      providerCategory: provider as NonNullable<
+        Parameters<typeof usesAnthropicNativeMessageFormat>[0]
+      >['providerCategory'],
     })
     const isThirdPartyProvider =
       provider !== 'foundry' && !isAnthropicNativeTransport
-    const thinkingStripped = isThirdPartyProvider
-      ? stripThinkingBlocks(filteredThinking)
-      : filteredThinking
+    const thinkingStripped =
+      isThirdPartyProvider && !shouldPreserveThinkingBlocksForProviderReplay()
+        ? stripThinkingBlocks(filteredThinking)
+        : filteredThinking
 
     // Filter out assistant messages with only whitespace text content.
     // This can happen when model outputs "\n\n" before thinking, user cancels mid-stream.
@@ -317,6 +390,56 @@ export function deserializeMessagesWithInterruptDetection(
     logError(error as Error)
     throw error
   }
+}
+
+type UdsClientModule = typeof import('./udsClient.js')
+type BgRegistryModule = typeof import('../cli/bgRegistry.js')
+
+type CollectLiveBackgroundSessionIdsDeps = {
+  listAllLiveSessions?: UdsClientModule['listAllLiveSessions']
+  refreshBackgroundSessionStatuses?: BgRegistryModule['refreshBackgroundSessionStatuses']
+  isTerminalBackgroundSession?: BgRegistryModule['isTerminalBackgroundSession']
+}
+
+export async function collectLiveBackgroundSessionIds(
+  deps: CollectLiveBackgroundSessionIdsDeps = {},
+): Promise<Set<string>> {
+  const skip = new Set<string>()
+  try {
+    const listAllLiveSessions =
+      deps.listAllLiveSessions ??
+      (await import('./udsClient.js')).listAllLiveSessions
+    const live = await listAllLiveSessions()
+    for (const session of live) {
+      if (session.kind && session.kind !== 'interactive' && session.sessionId) {
+        skip.add(session.sessionId)
+      }
+    }
+  } catch {
+    // UDS unavailable — local registry below still protects local bg sessions.
+  }
+
+  try {
+    let refreshBackgroundSessionStatuses =
+      deps.refreshBackgroundSessionStatuses
+    let isTerminalBackgroundSession = deps.isTerminalBackgroundSession
+    if (!refreshBackgroundSessionStatuses || !isTerminalBackgroundSession) {
+      const bgRegistry = await import('../cli/bgRegistry.js')
+      refreshBackgroundSessionStatuses ??=
+        bgRegistry.refreshBackgroundSessionStatuses
+      isTerminalBackgroundSession ??= bgRegistry.isTerminalBackgroundSession
+    }
+    const sessions = await refreshBackgroundSessionStatuses()
+    for (const session of sessions) {
+      if (!isTerminalBackgroundSession(session)) {
+        skip.add(session.sessionId)
+      }
+    }
+  } catch {
+    // Registry unavailable or unreadable — fall back to UDS-only results.
+  }
+
+  return skip
 }
 
 /**
@@ -484,8 +607,13 @@ export function restoreSkillStateFromMessages(messages: Message[]): void {
 export async function loadMessagesFromJsonlPath(path: string): Promise<{
   messages: SerializedMessage[]
   sessionId: UUID | undefined
+  goal: LogOption['goal'] | undefined
 }> {
-  const { messages: byUuid, leafUuids } = await loadTranscriptFile(path)
+  const {
+    messages: byUuid,
+    goalStates,
+    leafUuids,
+  } = await loadTranscriptFile(path)
   let tip: (typeof byUuid extends Map<UUID, infer T> ? T : never) | null = null
   let tipTs = 0
   for (const m of byUuid.values()) {
@@ -496,14 +624,16 @@ export async function loadMessagesFromJsonlPath(path: string): Promise<{
       tip = m
     }
   }
-  if (!tip) return { messages: [], sessionId: undefined }
+  if (!tip) return { messages: [], sessionId: undefined, goal: undefined }
   const chain = buildConversationChain(byUuid, tip)
+  const sessionId = tip.sessionId as UUID | undefined
   return {
     messages: removeExtraFields(chain),
     // Leaf's sessionId — forked sessions copy chain[0] from the source
     // transcript, so the root retains the source session's ID. Matches
     // loadFullLog's mostRecentLeaf.sessionId.
-    sessionId: tip.sessionId as UUID | undefined,
+    sessionId,
+    goal: sessionId ? goalStates.get(sessionId) : undefined,
   }
 }
 
@@ -544,6 +674,7 @@ export async function loadConversationForResume(
   prNumber?: number
   prUrl?: string
   prRepository?: string
+  goal?: LogOption['goal']
   // Full path to the session file (for cross-directory resume)
   fullPath?: string
 } | null> {
@@ -551,6 +682,7 @@ export async function loadConversationForResume(
     let log: LogOption | null = null
     let messages: Message[] | null = null
     let sessionId: UUID | undefined
+    let goal: LogOption['goal'] | undefined
 
     if (source === undefined) {
       // --continue: most recent session, skipping live --bg/daemon sessions
@@ -558,19 +690,7 @@ export async function loadConversationForResume(
       const logsPromise = loadMessageLogs()
       let skip = new Set<string>()
       if (feature('BG_SESSIONS')) {
-        try {
-          const { listAllLiveSessions } = await import('./udsClient.js')
-          const live = await listAllLiveSessions()
-          skip = new Set(
-            live.flatMap(s =>
-              s.kind && s.kind !== 'interactive' && s.sessionId
-                ? [s.sessionId]
-                : [],
-            ),
-          )
-        } catch {
-          // UDS unavailable — treat all sessions as continuable
-        }
+        skip = await collectLiveBackgroundSessionIds()
       }
       const logs = await logsPromise
       log =
@@ -585,6 +705,7 @@ export async function loadConversationForResume(
       const loaded = await loadMessagesFromJsonlPath(sourceJsonlFile)
       messages = loaded.messages
       sessionId = loaded.sessionId
+      goal = loaded.goal
     } else if (typeof source === 'string') {
       // Load specific session by ID
       log = await getLastSessionLog(source as UUID)
@@ -608,6 +729,7 @@ export async function loadConversationForResume(
       if (!sessionId) {
         sessionId = getSessionIdFromLog(log) as UUID
       }
+      goal = log.goal
       // Pass the original session ID to ensure the plan slug is associated with
       // the session we're resuming, not the temporary session ID before resume
       if (sessionId) {
@@ -660,6 +782,7 @@ export async function loadConversationForResume(
       prNumber: log?.prNumber,
       prUrl: log?.prUrl,
       prRepository: log?.prRepository,
+      goal,
       // Include full path for cross-directory resume
       fullPath: log?.fullPath,
     }
@@ -667,4 +790,20 @@ export async function loadConversationForResume(
     logError(error as Error)
     throw error
   }
+}
+
+export async function loadConversationForResumeFromPr(
+  selector: true | string,
+): ReturnType<typeof loadConversationForResume> {
+  const log = findResumeLogByPrSelector(await loadMessageLogs(), selector)
+  if (!log) return null
+  return loadConversationForResume(log, undefined)
+}
+
+export async function findResumeSessionIdByPrSelector(
+  selector: true | string,
+): Promise<UUID | null> {
+  const log = findResumeLogByPrSelector(await loadMessageLogs(), selector)
+  if (!log) return null
+  return getSessionIdFromLog(log) ?? null
 }

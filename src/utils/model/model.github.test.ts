@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
-import { saveGlobalConfig } from '../config.js'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../../test/sharedMutationLock.js'
+import {
+  type GlobalConfig,
+  getGlobalConfig,
+  saveGlobalConfig,
+} from '../config.js'
 import { getDefaultMainLoopModelSetting, getUserSpecifiedModelSetting } from './model.js'
 
 const env = {
@@ -12,8 +20,19 @@ const env = {
   CLAUDE_CODE_USE_FOUNDRY: process.env.CLAUDE_CODE_USE_FOUNDRY,
   OPENAI_MODEL: process.env.OPENAI_MODEL,
 }
+// `model` is a legacy loose key not declared on GlobalConfig.
+const originalModel = (getGlobalConfig() as GlobalConfig & Record<string, unknown>).model
 
-beforeEach(() => {
+function restoreEnv(key: keyof typeof env): void {
+  if (env[key] === undefined) {
+    delete process.env[key]
+  } else {
+    process.env[key] = env[key]
+  }
+}
+
+beforeEach(async () => {
+  await acquireSharedMutationLock('model/model.github.test.ts')
   process.env.CLAUDE_CODE_USE_GITHUB = '1'
   delete process.env.CLAUDE_CODE_USE_OPENAI
   delete process.env.CLAUDE_CODE_USE_GEMINI
@@ -28,17 +47,17 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  process.env.CLAUDE_CODE_USE_GITHUB = env.CLAUDE_CODE_USE_GITHUB
-  process.env.CLAUDE_CODE_USE_OPENAI = env.CLAUDE_CODE_USE_OPENAI
-  process.env.CLAUDE_CODE_USE_GEMINI = env.CLAUDE_CODE_USE_GEMINI
-  process.env.CLAUDE_CODE_USE_BEDROCK = env.CLAUDE_CODE_USE_BEDROCK
-  process.env.CLAUDE_CODE_USE_VERTEX = env.CLAUDE_CODE_USE_VERTEX
-  process.env.CLAUDE_CODE_USE_FOUNDRY = env.CLAUDE_CODE_USE_FOUNDRY
-  process.env.OPENAI_MODEL = env.OPENAI_MODEL
-  saveGlobalConfig(current => ({
-    ...current,
-    model: undefined,
-  }))
+  try {
+    for (const key of Object.keys(env) as Array<keyof typeof env>) {
+      restoreEnv(key)
+    }
+    saveGlobalConfig(current => ({
+      ...current,
+      model: originalModel,
+    }))
+  } finally {
+    releaseSharedMutationLock()
+  }
 })
 
 test('github default model setting ignores non-string saved model', () => {

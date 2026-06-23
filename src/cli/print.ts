@@ -68,6 +68,7 @@ import type { Stream } from 'src/utils/stream.js'
 import { EMPTY_USAGE } from 'src/services/api/logging.js'
 import {
   loadConversationForResume,
+  loadConversationForResumeFromPr,
   type TurnInterruptionState,
 } from 'src/utils/conversationRecovery.js'
 import type {
@@ -148,7 +149,10 @@ import {
 } from 'src/utils/permissions/PermissionPromptToolResultSchema.js'
 import { createAbortController } from 'src/utils/abortController.js'
 import { createCombinedAbortSignal } from 'src/utils/combinedAbortSignal.js'
-import { generateSessionTitle } from 'src/utils/sessionTitle.js'
+import {
+  generateSessionTitle,
+  titleOrNullForPromptFallback,
+} from 'src/utils/sessionTitle.js'
 import { buildSideQuestionFallbackParams } from 'src/utils/queryContext.js'
 import { runSideQuestion } from 'src/utils/sideQuestion.js'
 import {
@@ -174,12 +178,11 @@ import {
   getFastModeState,
 } from 'src/utils/fastMode.js'
 import {
-  isAutoModeGateEnabled,
-  getAutoModeUnavailableNotification,
-  getAutoModeUnavailableReason,
-  isBypassPermissionsModeDisabled,
-  transitionPermissionMode,
+  applyPermissionModeChange,
+  getPermissionModeChangeRequestDecision,
 } from 'src/utils/permissions/permissionSetup.js'
+import { requestPermissionModeChange } from 'src/utils/permissions/permissionModeChange.js'
+import { permissionModeFromString } from 'src/utils/permissions/PermissionMode.js'
 import {
   tryGenerateSuggestion,
   logSuggestionOutcome,
@@ -273,8 +276,7 @@ import {
 import { getModelOptions } from 'src/utils/model/modelOptions.js'
 import {
   modelSupportsEffort,
-  modelSupportsMaxEffort,
-  EFFORT_LEVELS,
+  getAvailableEffortLevels,
   resolveAppliedEffort,
 } from 'src/utils/effort.js'
 import { modelSupportsAdaptiveThinking } from 'src/utils/thinking.js'
@@ -457,6 +459,7 @@ export async function runHeadless(
   options: {
     continue: boolean | undefined
     resume: string | boolean | undefined
+    fromPr: string | boolean | undefined
     resumeSessionAt: string | undefined
     verbose: boolean | undefined
     outputFormat: string | undefined
@@ -538,9 +541,16 @@ export async function runHeadless(
     proactiveModule.activateProactive('command')
   }
 
-  // Periodically force a full GC to keep memory usage in check
-  if (typeof Bun !== 'undefined') {
-    const gcTimer = setInterval(Bun.gc, 1000)
+  // Periodically force a full GC to keep memory usage in check. The package
+  // launcher starts Node with --expose-gc; Bun exposes Bun.gc directly.
+  const forceGc =
+    typeof Bun !== 'undefined'
+      ? Bun.gc
+      : typeof (globalThis as { gc?: () => void }).gc === 'function'
+        ? (globalThis as { gc: () => void }).gc
+        : null
+  if (forceGc) {
+    const gcTimer = setInterval(forceGc, 1000)
     gcTimer.unref()
   }
 
@@ -558,14 +568,20 @@ export async function runHeadless(
   // Without this, the disk cache is empty and all flags fall back to defaults.
   void initializeGrowthBook()
 
-  if (options.resumeSessionAt && !options.resume) {
-    process.stderr.write(`Error: --resume-session-at requires --resume\n`)
+  const hasRequestedResumeSource = Boolean(options.resume || options.fromPr)
+
+  if (options.resumeSessionAt && !hasRequestedResumeSource) {
+    process.stderr.write(
+      `Error: --resume-session-at requires --resume or --from-pr\n`,
+    )
     gracefulShutdownSync(1)
     return
   }
 
-  if (options.rewindFiles && !options.resume) {
-    process.stderr.write(`Error: --rewind-files requires --resume\n`)
+  if (options.rewindFiles && !hasRequestedResumeSource) {
+    process.stderr.write(
+      `Error: --rewind-files requires --resume or --from-pr\n`,
+    )
     gracefulShutdownSync(1)
     return
   }
@@ -678,9 +694,11 @@ export async function runHeadless(
     turnInterruptionState,
     agentSetting: resumedAgentSetting,
   } = await loadInitialMessages(setAppState, {
+    getAppState,
     continue: options.continue,
     teleport: options.teleport,
     resume: options.resume,
+    fromPr: options.fromPr,
     resumeSessionAt: options.resumeSessionAt,
     forkSession: options.forkSession,
     outputFormat: options.outputFormat,
@@ -768,9 +786,11 @@ export async function runHeadless(
   const hasValidResumeSessionId =
     typeof options.resume === 'string' &&
     (Boolean(validateUuid(options.resume)) || options.resume.endsWith('.jsonl'))
+  const hasValidResumeSource =
+    hasValidResumeSessionId || Boolean(options.fromPr)
   const isUsingSdkUrl = Boolean(options.sdkUrl)
 
-  if (!inputPrompt && !hasValidResumeSessionId && !isUsingSdkUrl) {
+  if (!inputPrompt && !hasValidResumeSource && !isUsingSdkUrl) {
     process.stderr.write(
       `Error: Input must be provided either through stdin or as a prompt argument when using --print\n`,
     )
@@ -1057,6 +1077,7 @@ function runHeadlessStreaming(
       newMode === 'default' ||
       newMode === 'acceptEdits' ||
       newMode === 'bypassPermissions' ||
+      newMode === 'fullAccess' ||
       newMode === 'plan' ||
       newMode === (feature('TRANSCRIPT_CLASSIFIER') && 'auto') ||
       newMode === 'dontAsk'
@@ -1186,7 +1207,7 @@ function runHeadlessStreaming(
   }
 
   const modelOptions = getModelOptions()
-  const modelInfos = modelOptions.map(option => {
+  const modelInfos: ModelInfo[] = modelOptions.map((option): ModelInfo => {
     const modelId = option.value === null ? 'default' : option.value
     const resolvedModel =
       modelId === 'default'
@@ -1202,9 +1223,7 @@ function runHeadlessStreaming(
       description: option.description,
       ...(hasEffort && {
         supportsEffort: true,
-        supportedEffortLevels: modelSupportsMaxEffort(resolvedModel)
-          ? [...EFFORT_LEVELS]
-          : EFFORT_LEVELS.filter(l => l !== 'max'),
+        supportedEffortLevels: getAvailableEffortLevels(resolvedModel),
       }),
       ...(hasAdaptiveThinking && { supportsAdaptiveThinking: true }),
       ...(hasFastMode && { supportsFastMode: true }),
@@ -2907,14 +2926,15 @@ function runHeadlessStreaming(
           }
         } else if (message.request.subtype === 'set_permission_mode') {
           const m = message.request // for typescript (TODO: use readonly types to avoid this)
+          const nextToolPermissionContext = await handleSetPermissionMode(
+            m,
+            message.request_id,
+            getAppState().toolPermissionContext,
+            output,
+          )
           setAppState(prev => ({
             ...prev,
-            toolPermissionContext: handleSetPermissionMode(
-              m,
-              message.request_id,
-              prev.toolPermissionContext,
-              output,
-            ),
+            toolPermissionContext: nextToolPermissionContext,
             isUltraplanMode: m.ultraplan ?? prev.isUltraplanMode,
           }))
           // handleSetPermissionMode sends the control_response; the
@@ -3777,7 +3797,7 @@ function runHeadlessStreaming(
           const { description, persist } = message.request
           // Reuse the live controller only if it has not already been aborted
           // (e.g. by interrupt()); an aborted signal would cause queryHaiku to
-          // immediately throw APIUserAbortError → {title: null}.
+          // immediately throw APIUserAbortError and return the default title.
           const titleSignal = (
             abortController && !abortController.signal.aborted
               ? abortController
@@ -3786,9 +3806,10 @@ function runHeadlessStreaming(
           void (async () => {
             try {
               const title = await generateSessionTitle(description, titleSignal)
-              if (title && persist) {
+              const titleToPersist = titleOrNullForPromptFallback(title)
+              if (titleToPersist && persist) {
                 try {
-                  saveAiGeneratedTitle(getSessionId() as UUID, title)
+                  saveAiGeneratedTitle(getSessionId() as UUID, titleToPersist)
                 } catch (e) {
                   logError(e)
                 }
@@ -3796,7 +3817,7 @@ function runHeadlessStreaming(
               sendControlResponseSuccess(message, { title })
             } catch (e) {
               // Unreachable in practice — generateSessionTitle wraps its
-              // own body and returns null, saveAiGeneratedTitle is wrapped
+              // own body and returns a default title, saveAiGeneratedTitle is wrapped
               // above. Propagate (not swallow) so unexpected failures are
               // visible to the SDK caller (hostComms.ts catches and logs).
               sendControlResponseError(message, errorMessage(e))
@@ -4147,15 +4168,19 @@ export function createCanUseToolWithPermissionPrompt(
     toolUseId,
     forceDecision,
   ) => {
+    const shouldBypassForcedAsk =
+      forceDecision?.behavior === 'ask' &&
+      toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
     const mainPermissionResult =
-      forceDecision ??
-      (await hasPermissionsToUseTool(
+      forceDecision !== undefined && !shouldBypassForcedAsk
+        ? forceDecision
+        : await hasPermissionsToUseTool(
         tool,
         input,
         toolUseContext,
         assistantMessage,
         toolUseId,
-      ))
+      )
 
     // If the tool is allowed or denied, return the result
     if (
@@ -4271,15 +4296,20 @@ export function getCanUseToolFn(
       assistantMessage,
       toolUseId,
       forceDecision,
-    ) =>
-      forceDecision ??
-      (await hasPermissionsToUseTool(
+    ) => {
+      const shouldBypassForcedAsk =
+        forceDecision?.behavior === 'ask' &&
+        toolUseContext.getAppState().toolPermissionContext.mode === 'fullAccess'
+      return forceDecision !== undefined && !shouldBypassForcedAsk
+        ? forceDecision
+        : await hasPermissionsToUseTool(
         tool,
         input,
         toolUseContext,
         assistantMessage,
         toolUseId,
-      ))
+      )
+    }
   }
   // Lazy lookup: MCP connects are per-server incremental in print mode, so
   // the tool may not be in appState yet at init time. Resolve on first call
@@ -4555,55 +4585,37 @@ async function handleRewindFiles(
   return { canRewind: true }
 }
 
-function handleSetPermissionMode(
+async function handleSetPermissionMode(
   request: { mode: InternalPermissionMode },
   requestId: string,
   toolPermissionContext: ToolPermissionContext,
   output: Stream<StdoutMessage>,
-): ToolPermissionContext {
-  // Check if trying to switch to bypassPermissions mode
-  if (request.mode === 'bypassPermissions') {
-    if (isBypassPermissionsModeDisabled()) {
-      output.enqueue({
-        type: 'control_response',
-        response: {
-          subtype: 'error',
-          request_id: requestId,
-          error:
-            'Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration',
-        },
-      })
-      return toolPermissionContext
-    }
-    if (!toolPermissionContext.isBypassPermissionsModeAvailable) {
-      output.enqueue({
-        type: 'control_response',
-        response: {
-          subtype: 'error',
-          request_id: requestId,
-          error:
-            'Cannot set permission mode to bypassPermissions. Enable it with --allow-dangerously-skip-permissions or set permissions.allowBypassPermissionsMode in settings.json',
-        },
-      })
-      return toolPermissionContext
-    }
-  }
+): Promise<ToolPermissionContext> {
+  let nextToolPermissionContext = toolPermissionContext
+  let blockedError: string | undefined
 
-  // Check if trying to switch to auto mode without the classifier gate
-  if (
-    feature('TRANSCRIPT_CLASSIFIER') &&
-    request.mode === 'auto' &&
-    !isAutoModeGateEnabled()
-  ) {
-    const reason = getAutoModeUnavailableReason()
+  const result = await requestPermissionModeChange({
+    mode: request.mode,
+    toolPermissionContext,
+    allowDangerousModeConfirmation: false,
+    onApply: () => {
+      nextToolPermissionContext = applyPermissionModeChange(
+        toolPermissionContext,
+        request.mode,
+      )
+    },
+    onBlocked: error => {
+      blockedError = error
+    },
+  })
+
+  if (result.status !== 'applied') {
     output.enqueue({
       type: 'control_response',
       response: {
         subtype: 'error',
         request_id: requestId,
-        error: reason
-          ? `Cannot set permission mode to auto: ${getAutoModeUnavailableNotification(reason)}`
-          : 'Cannot set permission mode to auto',
+        error: blockedError ?? `Cannot set permission mode to ${request.mode}`,
       },
     })
     return toolPermissionContext
@@ -4621,13 +4633,38 @@ function handleSetPermissionMode(
     },
   })
 
+  return nextToolPermissionContext
+}
+
+async function sanitizeResumedExternalMetadata(
+  metadata: SessionExternalMetadata,
+  toolPermissionContext: ToolPermissionContext,
+): Promise<SessionExternalMetadata> {
+  if (typeof metadata.permission_mode !== 'string') {
+    return metadata
+  }
+
+  const resumedMode = permissionModeFromString(metadata.permission_mode)
+  if (resumedMode !== 'bypassPermissions' && resumedMode !== 'fullAccess') {
+    return metadata
+  }
+
+  const modeDecision = await getPermissionModeChangeRequestDecision({
+    mode: resumedMode,
+    toolPermissionContext,
+  })
+  if (modeDecision.status !== 'blocked') {
+    return metadata
+  }
+
+  logForDebugging(
+    `Discarding resumed dangerous permission mode ${resumedMode}: ${modeDecision.error}`,
+    { level: 'warn' },
+  )
+  notifySessionMetadataChanged({ permission_mode: 'default' })
   return {
-    ...transitionPermissionMode(
-      toolPermissionContext.mode,
-      request.mode,
-      toolPermissionContext,
-    ),
-    mode: request.mode,
+    ...metadata,
+    permission_mode: 'default',
   }
 }
 
@@ -4883,9 +4920,11 @@ type LoadInitialMessagesResult = {
 async function loadInitialMessages(
   setAppState: (f: (prev: AppState) => AppState) => void,
   options: {
+    getAppState: () => AppState
     continue: boolean | undefined
     teleport: string | true | null | undefined
     resume: string | boolean | undefined
+    fromPr: string | boolean | undefined
     resumeSessionAt: string | undefined
     forkSession: boolean | undefined
     outputFormat: string | undefined
@@ -5014,58 +5053,82 @@ async function loadInitialMessages(
     }
   }
 
-  // Handle resume in print mode (accepts session ID or URL)
+  // Handle resume in print mode (accepts session ID, URL, or PR selector)
   // URLs are [internal-only]
-  if (options.resume) {
+  if (options.resume || options.fromPr) {
     try {
-      logEvent('tengu_resume_print', {})
+      let result: Awaited<ReturnType<typeof loadConversationForResume>> = null
+      let parsedSessionId: ReturnType<typeof parseSessionIdentifier> = null
 
-      // In print mode - we require a valid session ID, JSONL file or URL
-      const parsedSessionId = parseSessionIdentifier(
-        typeof options.resume === 'string' ? options.resume : '',
-      )
-      if (!parsedSessionId) {
-        let errorMessage =
-          'Error: --resume requires a valid session ID when used with --print. Usage: openclaude -p --resume <session-id>'
-        if (typeof options.resume === 'string') {
-          errorMessage += `. Session IDs must be in UUID format (e.g., 550e8400-e29b-41d4-a716-446655440000). Provided value "${options.resume}" is not a valid UUID`
-        }
-        emitLoadError(errorMessage, options.outputFormat)
-        gracefulShutdownSync(1)
-        return { messages: [] }
-      }
+      if (options.resume) {
+        logEvent('tengu_resume_print', {})
 
-      // Hydrate local transcript from remote before loading
-      if (isEnvTruthy(process.env.CLAUDE_CODE_USE_CCR_V2)) {
-        // Await restore alongside hydration so SSE catchup lands on
-        // restored state, not a fresh default.
-        const [, metadata] = await Promise.all([
-          hydrateFromCCRv2InternalEvents(parsedSessionId.sessionId),
-          options.restoredWorkerState,
-        ])
-        if (metadata) {
-          setAppState(externalMetadataToAppState(metadata))
-          if (typeof metadata.model === 'string') {
-            setMainLoopModelOverride(metadata.model)
-          }
-        }
-      } else if (
-        parsedSessionId.isUrl &&
-        parsedSessionId.ingressUrl &&
-        isEnvTruthy(process.env.ENABLE_SESSION_PERSISTENCE)
-      ) {
-        // v1: fetch session logs from Session Ingress
-        await hydrateRemoteSession(
-          parsedSessionId.sessionId,
-          parsedSessionId.ingressUrl,
+        // In print mode - we require a valid session ID, JSONL file or URL
+        parsedSessionId = parseSessionIdentifier(
+          typeof options.resume === 'string' ? options.resume : '',
         )
-      }
+        if (!parsedSessionId) {
+          let errorMessage =
+            'Error: --resume requires a valid session ID when used with --print. Usage: openclaude -p --resume <session-id>'
+          if (typeof options.resume === 'string') {
+            errorMessage += `. Session IDs must be in UUID format (e.g., 550e8400-e29b-41d4-a716-446655440000). Provided value "${options.resume}" is not a valid UUID`
+          }
+          emitLoadError(errorMessage, options.outputFormat)
+          gracefulShutdownSync(1)
+          return { messages: [] }
+        }
 
-      // Load the conversation with the specified session ID
-      const result = await loadConversationForResume(
-        parsedSessionId.sessionId,
-        parsedSessionId.jsonlFile || undefined,
-      )
+        // Hydrate local transcript from remote before loading
+        if (isEnvTruthy(process.env.CLAUDE_CODE_USE_CCR_V2)) {
+          // Await restore alongside hydration so SSE catchup lands on
+          // restored state, not a fresh default.
+          const [, metadata] = await Promise.all([
+            hydrateFromCCRv2InternalEvents(parsedSessionId.sessionId),
+            options.restoredWorkerState,
+          ])
+          if (metadata) {
+            const sanitizedMetadata = await sanitizeResumedExternalMetadata(
+              metadata,
+              options.getAppState().toolPermissionContext,
+            )
+            setAppState(externalMetadataToAppState(sanitizedMetadata))
+            if (typeof metadata.model === 'string') {
+              setMainLoopModelOverride(metadata.model)
+            }
+          }
+        } else if (
+          parsedSessionId.isUrl &&
+          parsedSessionId.ingressUrl &&
+          isEnvTruthy(process.env.ENABLE_SESSION_PERSISTENCE)
+        ) {
+          // v1: fetch session logs from Session Ingress
+          await hydrateRemoteSession(
+            parsedSessionId.sessionId,
+            parsedSessionId.ingressUrl,
+          )
+        }
+
+        // Load the conversation with the specified session ID
+        result = await loadConversationForResume(
+          parsedSessionId.sessionId,
+          parsedSessionId.jsonlFile || undefined,
+        )
+      } else if (options.fromPr) {
+        logEvent('tengu_resume_from_pr_print', {})
+        const selector =
+          options.fromPr === true ? true : String(options.fromPr)
+        result = await loadConversationForResumeFromPr(selector)
+        if (!result || result.messages.length === 0) {
+          const description =
+            selector === true ? 'any PR' : `PR selector: ${selector}`
+          emitLoadError(
+            `No conversation found linked to ${description}`,
+            options.outputFormat,
+          )
+          gracefulShutdownSync(1)
+          return { messages: [] }
+        }
+      }
 
       // hydrateFromCCRv2InternalEvents writes an empty transcript file for
       // fresh sessions (writeFile(sessionFile, '') with zero events), so
@@ -5074,7 +5137,7 @@ async function loadInitialMessages(
       if (!result || result.messages.length === 0) {
         // For URL-based or CCR v2 resume, start with empty session (it was hydrated but empty)
         if (
-          parsedSessionId.isUrl ||
+          parsedSessionId?.isUrl ||
           isEnvTruthy(process.env.CLAUDE_CODE_USE_CCR_V2)
         ) {
           // Execute SessionStart hooks for startup since we're starting a new session
@@ -5084,7 +5147,9 @@ async function loadInitialMessages(
           }
         } else {
           emitLoadError(
-            `No conversation found with session ID: ${parsedSessionId.sessionId}`,
+            parsedSessionId
+              ? `No conversation found with session ID: ${parsedSessionId.sessionId}`
+              : 'No conversation found for selected PR-linked session',
             options.outputFormat,
           )
           gracefulShutdownSync(1)

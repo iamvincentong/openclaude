@@ -16,9 +16,12 @@
  *   5. GEMINI_API_KEY or GOOGLE_API_KEY
  *   6. MISTRAL_API_KEY
  *   7. MINIMAX_API_KEY
- *   8. XAI_API_KEY
- *   9. Local Ollama reachable (default localhost:11434)
- *  10. Local LM Studio reachable (default localhost:1234)
+ *   8. MIMO_API_KEY (Xiaomi Mimo)
+ *   9. XAI_API_KEY
+ *  10. NEARAI_API_KEY
+ *  11. FIREWORKS_API_KEY
+ *  12. Local Ollama reachable (default localhost:11434)
+ *  13. Local LM Studio reachable (default localhost:1234)
  *
  * Local-service probes are parallelized and cheap (short timeout, no
  * request body). Env scans are synchronous and run first so we don't make
@@ -31,6 +34,7 @@
 
 import { existsSync } from 'fs'
 import { homedir } from 'os'
+import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { join } from 'path'
 
 export type DetectedProviderKind =
@@ -41,9 +45,13 @@ export type DetectedProviderKind =
   | 'gemini'
   | 'mistral'
   | 'minimax'
+  | 'xiaomi-mimo'
   | 'xai'
+  | 'nearai'
+  | 'fireworks'
   | 'ollama'
   | 'lm-studio'
+  | 'gitlawb-opengateway'
 
 export type DetectedProvider = {
   kind: DetectedProviderKind
@@ -62,9 +70,23 @@ function envHasNonEmpty(env: EnvLike, key: string): boolean {
   return typeof value === 'string' && value.trim().length > 0
 }
 
+function envHasUsableOpenAICredential(env: EnvLike, key: string): boolean {
+  return hasUsableOpenAICredential(env[key])
+}
+
 function firstSet(env: EnvLike, keys: readonly string[]): string | undefined {
   for (const key of keys) {
     if (envHasNonEmpty(env, key)) return key
+  }
+  return undefined
+}
+
+function firstOpenAICredentialSet(
+  env: EnvLike,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    if (envHasUsableOpenAICredential(env, key)) return key
   }
   return undefined
 }
@@ -139,7 +161,10 @@ export function detectProviderFromEnv(
     }
   }
 
-  const openaiKey = firstSet(env, ['OPENAI_API_KEYS', 'OPENAI_API_KEY'])
+  const openaiKey = firstOpenAICredentialSet(env, [
+    'OPENAI_API_KEYS',
+    'OPENAI_API_KEY',
+  ])
   if (openaiKey) {
     return {
       kind: 'openai',
@@ -161,8 +186,26 @@ export function detectProviderFromEnv(
     return { kind: 'minimax', source: 'MINIMAX_API_KEY set' }
   }
 
+  if (envHasNonEmpty(env, 'MIMO_API_KEY')) {
+    return { kind: 'xiaomi-mimo', source: 'MIMO_API_KEY set' }
+  }
+
   if (envHasNonEmpty(env, 'XAI_API_KEY')) {
     return { kind: 'xai', source: 'XAI_API_KEY set' }
+  }
+
+  if (envHasNonEmpty(env, 'NEARAI_API_KEY')) {
+    return {
+      kind: 'nearai',
+      source: 'NEARAI_API_KEY set',
+    }
+  }
+
+  if (envHasNonEmpty(env, 'FIREWORKS_API_KEY')) {
+    return {
+      kind: 'fireworks',
+      source: 'FIREWORKS_API_KEY set',
+    }
   }
 
   return null
@@ -262,6 +305,54 @@ export async function detectLocalService(options?: {
  * Orchestrator: env scan first (sync, free), then local-service probes
  * (async, ~1-2s worst case) only if nothing was found in env.
  */
+const OPENGATEWAY_DEFAULT_BASE_URL = 'https://opengateway.gitlawb.com/v1'
+const OPENGATEWAY_DEFAULT_MODEL = 'mimo-v2.5-pro'
+
+function normalizeOpengatewayBaseUrl(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl)
+    const hostname = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.replace(/\/+$/, '').toLowerCase()
+    if (
+      (hostname === 'opengateway.gitlawb.com' || hostname === 'opengateway.fly.dev') &&
+      (path === '/v1/xiaomi-mimo' || path === '/v1/gmi-cloud')
+    ) {
+      parsed.pathname = '/v1'
+      parsed.search = ''
+      parsed.hash = ''
+      return parsed.toString().replace(/\/+$/, '')
+    }
+  } catch {
+    return baseUrl
+  }
+  return baseUrl
+}
+
+/**
+ * Fallback: the Gitlawb Opengateway exposes partner inference through a
+ * smart OpenAI-compatible route. As of 2026-05-22 it requires a per-user API
+ * key (signup at https://gitlawb.com/opengateway/keys); without a key we return
+ * null so the caller surfaces the missing-credential prompt instead of
+ * silently routing to an endpoint that will 401.
+ */
+function defaultOpengatewayProvider(env: EnvLike): DetectedProvider | null {
+  const hasKey =
+    (typeof env.OPENGATEWAY_API_KEY === 'string' && env.OPENGATEWAY_API_KEY.trim().length > 0) ||
+    (typeof env.OPENAI_API_KEY === 'string' && env.OPENAI_API_KEY.trim().length > 0)
+  if (!hasKey) return null
+
+  const baseUrl =
+    (typeof env.OPENGATEWAY_BASE_URL === 'string' && env.OPENGATEWAY_BASE_URL.trim()) ||
+    OPENGATEWAY_DEFAULT_BASE_URL
+  return {
+    kind: 'gitlawb-opengateway',
+    source:
+      'Gitlawb Opengateway (API key required, signup at https://gitlawb.com/opengateway/keys)',
+    baseUrl: normalizeOpengatewayBaseUrl(baseUrl),
+    model: OPENGATEWAY_DEFAULT_MODEL,
+  }
+}
+
 export async function detectBestProvider(options?: {
   env?: EnvLike
   fetchImpl?: typeof fetch
@@ -270,6 +361,11 @@ export async function detectBestProvider(options?: {
   skipLocal?: boolean
   /** Override for Codex auth-file detection. See detectProviderFromEnv. */
   hasCodexAuth?: () => boolean
+  /**
+   * Disable the Gitlawb Opengateway fallback. Returns null when no other
+   * provider is detected. Use this in tests that need to assert "nothing found".
+   */
+  skipOpengatewayFallback?: boolean
 }): Promise<DetectedProvider | null> {
   const env = options?.env ?? process.env
 
@@ -279,11 +375,16 @@ export async function detectBestProvider(options?: {
   })
   if (fromEnv) return fromEnv
 
-  if (options?.skipLocal) return null
+  if (!options?.skipLocal) {
+    const local = await detectLocalService({
+      env,
+      fetchImpl: options?.fetchImpl,
+      timeoutMs: options?.timeoutMs,
+    })
+    if (local) return local
+  }
 
-  return detectLocalService({
-    env,
-    fetchImpl: options?.fetchImpl,
-    timeoutMs: options?.timeoutMs,
-  })
+  if (options?.skipOpengatewayFallback) return null
+
+  return defaultOpengatewayProvider(env)
 }

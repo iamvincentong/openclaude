@@ -15,23 +15,35 @@ import {
   getRouteCredentialValue,
   getRouteDescriptor,
   getRouteDefaultModel,
+  matchHostnameAgainstRouteHosts,
   resolveActiveRouteIdFromEnv,
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 import {
   getGithubEndpointType,
+  isLikelyOllamaEndpoint,
   isLocalProviderUrl,
   resolveCodexApiCredentials,
   resolveProviderRequest,
   shouldUseCodexTransport,
 } from '../services/api/providerConfig.js'
+import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { getGlobalClaudeFile } from './env.js'
 import { isBareMode } from './envUtils.js'
 import {
   type GeminiResolvedCredential,
   resolveGeminiCredential,
 } from './geminiAuth.js'
-import { PROFILE_FILE_NAME } from './providerProfile.js'
+import { readXaiCredentialsAsync } from './xaiCredentials.js'
+
+async function defaultHasStoredXaiOAuthCredentials(): Promise<boolean> {
+  const stored = await readXaiCredentialsAsync()
+  return Boolean(stored?.accessToken && stored?.refreshToken)
+}
+import {
+  PROFILE_FILE_NAME,
+  resolveOpenAICredentialEnvState,
+} from './providerProfile.js'
 import {
   redactSecretValueForDisplay,
   type SecretValueSource,
@@ -53,9 +65,10 @@ const GITHUB_PAT_PREFIXES = ['ghp_', 'gho_', 'ghs_', 'ghr_', 'github_pat_']
 
 function checkGithubTokenStatus(
   token: string,
-  endpointType: 'copilot' | 'models' | 'custom' = 'copilot',
+  endpointType: 'copilot' | 'models' | 'ghe' | 'custom' = 'copilot',
 ): GithubTokenStatus {
   // PATs work with GitHub Models but not with Copilot API
+  // For GHE, PATs work if they have the right scopes
   if (GITHUB_PAT_PREFIXES.some(prefix => token.startsWith(prefix))) {
     if (endpointType === 'copilot') {
       return 'expired'
@@ -97,7 +110,7 @@ function getOpenAIMissingKeyMessage(): string {
   const profilePath = resolve(process.cwd(), PROFILE_FILE_NAME)
 
   return [
-    'OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local.',
+    'OPENAI_API_KEYS or OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local.',
     `To recover, run /provider and switch provider, or set CLAUDE_CODE_USE_OPENAI=0 in your shell environment.`,
     `Saved startup settings can come from ${globalConfigPath} or ${profilePath}.`,
   ].join('\n')
@@ -108,6 +121,29 @@ function hasNonEmptyEnvValue(
   envVar: string,
 ): boolean {
   return typeof env[envVar] === 'string' && env[envVar]!.trim() !== ''
+}
+
+function hasUsableCredentialEnvValue(
+  env: NodeJS.ProcessEnv,
+  envVar: string,
+): boolean {
+  const value = env[envVar]
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  if (envVar === 'OPENAI_API_KEYS' || envVar === 'OPENAI_API_KEY') {
+    return hasUsableOpenAICredential(value)
+  }
+
+  return value.trim() !== ''
+}
+
+function hasOpenAICredential(env: NodeJS.ProcessEnv): boolean {
+  return (
+    hasUsableCredentialEnvValue(env, 'OPENAI_API_KEYS') ||
+    hasUsableCredentialEnvValue(env, 'OPENAI_API_KEY')
+  )
 }
 
 function normalizeBaseUrl(baseUrl: string | undefined): string | undefined {
@@ -169,6 +205,13 @@ function getValidationRouting(target: ValidationTarget) {
   return target.descriptor.validation?.routing
 }
 
+function isGithubEnterpriseValidationEnv(env: NodeJS.ProcessEnv): boolean {
+  if (env.GITHUB_ENTERPRISE_URL?.trim()) {
+    return true
+  }
+  return getGithubEndpointType(env.OPENAI_BASE_URL) === 'ghe'
+}
+
 function getValidationTargetBaseUrl(
   target: ValidationTarget,
 ): string | undefined {
@@ -189,6 +232,18 @@ function getRuntimeValidationTarget(
 
     if (useOpenAI && routing.skipWhenUseOpenAI) {
       return false
+    }
+
+    if (target.kind === 'gateway') {
+      if (target.descriptor.id === 'github-enterprise') {
+        return isGithubEnterpriseValidationEnv(env)
+      }
+      if (
+        target.descriptor.id === 'github' &&
+        isGithubEnterpriseValidationEnv(env)
+      ) {
+        return false
+      }
     }
 
     return true
@@ -227,9 +282,8 @@ function getRuntimeValidationTarget(
     }
 
     return (
-      routing.matchBaseUrlHosts?.some(
-        host => requestHost === host.toLowerCase(),
-      ) ?? false
+      routing.matchBaseUrlHosts &&
+      matchHostnameAgainstRouteHosts(requestHost, routing.matchBaseUrlHosts)
     )
   })
 
@@ -247,8 +301,34 @@ function getCredentialEnvValidationError(
   env: NodeJS.ProcessEnv,
   request?: ReturnType<typeof resolveProviderRequest>,
 ): string | null {
+  const credentialEnvVars = validation.credentialEnvVars
+  const usesOpenAIFallback =
+    credentialEnvVars.includes('OPENAI_API_KEYS') ||
+    credentialEnvVars.includes('OPENAI_API_KEY')
+
+  if (usesOpenAIFallback) {
+    const openAIState = resolveOpenAICredentialEnvState(env)
+    if (openAIState.invalid) {
+      return (
+        validation.invalidCredentialValues?.find(
+          invalidValue => invalidValue.envVar === openAIState.envVar,
+        )?.message ?? null
+      )
+    }
+  }
+
   for (const invalidValue of validation.invalidCredentialValues ?? []) {
-    if (env[invalidValue.envVar]?.trim() === invalidValue.value) {
+    if (
+      usesOpenAIFallback &&
+      (invalidValue.envVar === 'OPENAI_API_KEYS' ||
+        invalidValue.envVar === 'OPENAI_API_KEY')
+    ) {
+      continue
+    }
+
+    const envValue = env[invalidValue.envVar]
+    const envValues = (envValue ?? '').split(',').map(value => value.trim())
+    if (envValues.includes(invalidValue.value)) {
       return invalidValue.message
     }
   }
@@ -256,13 +336,14 @@ function getCredentialEnvValidationError(
   if (
     validation.allowLocalBaseUrlWithoutCredential &&
     request &&
-    isLocalProviderUrl(request.baseUrl)
+    (isLocalProviderUrl(request.baseUrl) ||
+      isLikelyOllamaEndpoint(request.baseUrl))
   ) {
     return null
   }
 
   if (
-    validation.credentialEnvVars.some(envVar => hasNonEmptyEnvValue(env, envVar))
+    credentialEnvVars.some(envVar => hasUsableCredentialEnvValue(env, envVar))
   ) {
     return null
   }
@@ -278,6 +359,7 @@ async function getDescriptorValidationError(
     resolveGeminiCredential?: (
       env: NodeJS.ProcessEnv,
     ) => Promise<GeminiResolvedCredential>
+    hasStoredXaiOAuthCredentials?: () => Promise<boolean>
   },
 ): Promise<string | null> {
   const validation = target.descriptor.validation
@@ -299,12 +381,25 @@ async function getDescriptorValidationError(
     }
 
     case 'github-token': {
+      // GITHUB_COPILOT_KEY is a direct API key for GitHub Copilot Enterprise
+      // It doesn't need token status validation as it's used directly
+      if (env.GITHUB_COPILOT_KEY?.trim()) {
+        return null
+      }
+
       const token = (env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim()) ?? ''
       if (!token) {
         return validation.missingCredentialMessage
       }
 
-      const endpointType = getGithubEndpointType(env.OPENAI_BASE_URL)
+      const githubEnterpriseUrl = env.GITHUB_ENTERPRISE_URL?.trim()
+      const endpointType = githubEnterpriseUrl
+        ? (env.OPENAI_BASE_URL?.trim()
+          ? getGithubEndpointType(env.OPENAI_BASE_URL, {
+            githubEnterpriseUrl,
+          })
+          : 'ghe')
+        : getGithubEndpointType(env.OPENAI_BASE_URL)
       const status = checkGithubTokenStatus(token, endpointType)
       if (status === 'expired') {
         return validation.expiredCredentialMessage
@@ -314,6 +409,40 @@ async function getDescriptorValidationError(
       }
 
       return null
+    }
+
+    case 'xai-credential': {
+      // 1. API key in env (legacy / explicit override path)
+      if (
+        validation.credentialEnvVars.some(envVar => hasNonEmptyEnvValue(env, envVar))
+      ) {
+        return null
+      }
+      // 2. OAuth profile marker, e.g. XAI_CREDENTIAL_SOURCE=oauth set by
+      // the saved profile's env. Cheap synchronous check before we touch
+      // secure storage.
+      const markers = validation.credentialSourceEnvMarkers
+      if (markers) {
+        for (const [markerEnv, allowedValues] of Object.entries(markers)) {
+          const value = env[markerEnv]?.trim()
+          if (value && allowedValues.includes(value)) {
+            return null
+          }
+        }
+      }
+      // 3. Stored OAuth credentials — covers the gap where a user has
+      // signed in (secure storage populated) but the profile env hasn't
+      // been applied yet (e.g. fresh process before applySavedProfile).
+      // Bare mode short-circuits inside readXaiCredentialsAsync, so this
+      // is safe to call unconditionally. Injectable so tests don't
+      // depend on the developer's actual login state.
+      const hasStored = options.hasStoredXaiOAuthCredentials
+        ? await options.hasStoredXaiOAuthCredentials()
+        : await defaultHasStoredXaiOAuthCredentials()
+      if (hasStored) {
+        return null
+      }
+      return validation.missingCredentialMessage
     }
   }
 }
@@ -374,16 +503,10 @@ export async function getProviderValidationError(
     resolveGeminiCredential?: (
       env: NodeJS.ProcessEnv,
     ) => Promise<GeminiResolvedCredential>
+    hasStoredXaiOAuthCredentials?: () => Promise<boolean>
   },
 ): Promise<string | null> {
-  const secretSource: SecretValueSource = {
-    OPENAI_API_KEY: env.OPENAI_API_KEY,
-    CODEX_API_KEY: env.CODEX_API_KEY,
-    GEMINI_API_KEY: env.GEMINI_API_KEY,
-    GOOGLE_API_KEY: env.GOOGLE_API_KEY,
-    MISTRAL_API_KEY: env.MISTRAL_API_KEY,
-    BNKR_API_KEY: env.BNKR_API_KEY,
-  }
+  const secretSource = env as SecretValueSource
   const useOpenAI = isEnvTruthy(env.CLAUDE_CODE_USE_OPENAI)
   const validationTarget = getRuntimeValidationTarget(env)
 
@@ -445,15 +568,19 @@ export async function getProviderValidationError(
         {
           request,
           resolveGeminiCredential: options?.resolveGeminiCredential,
+          hasStoredXaiOAuthCredentials: options?.hasStoredXaiOAuthCredentials,
         },
       )
 
       if (descriptorValidationError) {
         if (
+          descriptorValidationError ===
+            validationTarget.descriptor.validation?.missingCredentialMessage &&
           validationTarget.kind === 'vendor' &&
           validationTarget.descriptor.id === 'openai' &&
-          !env.OPENAI_API_KEY &&
-          !isLocalProviderUrl(request.baseUrl)
+          !hasOpenAICredential(env) &&
+          !isLocalProviderUrl(request.baseUrl) &&
+          !isLikelyOllamaEndpoint(request.baseUrl)
         ) {
           return getOpenAIMissingKeyMessage()
         }
@@ -469,7 +596,24 @@ export async function getProviderValidationError(
     return genericRouteValidation.error
   }
 
-  if (!env.OPENAI_API_KEY && !isLocalProviderUrl(request.baseUrl)) {
+  if (
+    !hasOpenAICredential(env) &&
+    !isLocalProviderUrl(request.baseUrl) &&
+    !isLikelyOllamaEndpoint(request.baseUrl)
+  ) {
+    // If we have a validation target that explicitly says it doesn't require auth,
+    // we should not require OPENAI_API_KEY.
+    if (validationTarget?.descriptor.setup?.requiresAuth === false) {
+      return null
+    }
+
+    // For other OpenAI-compatible providers, check if any of their specific
+    // credential env vars are set before falling back to the generic error.
+    const envVars = validationTarget?.descriptor.setup?.credentialEnvVars ?? []
+    if (envVars.some(v => env[v])) {
+      return null
+    }
+
     return getOpenAIMissingKeyMessage()
   }
 

@@ -10,7 +10,7 @@
  * - Self-referential type wrappers
  */
 import { afterAll, describe, expect, test } from 'bun:test'
-import { execSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import { existsSync, mkdirSync, rmSync, writeFileSync, cpSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -18,6 +18,7 @@ import { randomUUID } from 'crypto'
 const ROOT = join(import.meta.dir, '..', '..')
 const SDK_DTS = join(ROOT, 'src', 'entrypoints', 'sdk.d.ts')
 const CORE_TYPES_TS = join(ROOT, 'src', 'entrypoints', 'sdk', 'coreTypes.generated.ts')
+const TSC_BIN = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc')
 
 /** All temp dirs created during tests — cleaned up in afterAll */
 const tempDirs: string[] = []
@@ -92,7 +93,7 @@ function setupConsumerProject(name: string): string {
 
 /** Compile consumer.ts in the given tmpDir. Returns stdout (empty = success). */
 function tsc(tmpDir: string): string {
-  return execSync('npx tsc -p tsconfig.json --pretty false', {
+  return execFileSync(process.execPath, [TSC_BIN, '-p', 'tsconfig.json', '--pretty', 'false'], {
     cwd: tmpDir,
     encoding: 'utf-8',
     timeout: 60000,
@@ -183,6 +184,40 @@ describe('package consumer types', () => {
     expect(tsc(tmpDir)).toBe('')
   }, 30_000)
 
+  test('result usage standard counters are required numbers', () => {
+    const tmpDir = setupConsumerProject('usage-counters')
+
+    writeFileSync(
+      join(tmpDir, 'consumer.ts'),
+      [
+        `import type { SDKResultMessage } from '@gitlawb/openclaude/sdk'`,
+        ``,
+        `// Result messages are populated from QueryEngine.totalUsage`,
+        `// (initialized from EMPTY_USAGE), so the standard counters are`,
+        `// always-present numbers — strict consumers may sum them without`,
+        `// undefined guards.`,
+        `declare const result: SDKResultMessage`,
+        `const _total: number =`,
+        `  result.usage.input_tokens +`,
+        `  result.usage.output_tokens +`,
+        `  result.usage.cache_creation_input_tokens +`,
+        `  result.usage.cache_read_input_tokens`,
+        ``,
+        `// Richer nested metadata is modeled explicitly`,
+        `const _cache5m: number | undefined =`,
+        `  result.usage.cache_creation?.ephemeral_5m_input_tokens`,
+        `const _webSearches: number | undefined =`,
+        `  result.usage.server_tool_use?.web_search_requests`,
+        `const _tier: string | undefined = result.usage.service_tier`,
+        ``,
+        `// Unanticipated fields still flow through the index signature`,
+        `const _extra: unknown = result.usage.inference_geo`,
+      ].join('\n'),
+    )
+
+    expect(tsc(tmpDir)).toBe('')
+  }, 30_000)
+
   test('SDKRateLimitError has resetsAt and rateLimitType as class properties', () => {
     const tmpDir = setupConsumerProject('ratelimit')
 
@@ -199,6 +234,39 @@ describe('package consumer types', () => {
         `const rateType: string | undefined = err.rateLimitType`,
         ``,
         `console.log(resets, rateType)`,
+      ].join('\n'),
+    )
+
+    expect(tsc(tmpDir)).toBe('')
+  }, 30_000)
+
+  test('control initialize response accepts generated model and account values', () => {
+    const tmpDir = setupConsumerProject('control-init')
+
+    writeFileSync(
+      join(tmpDir, 'consumer.ts'),
+      [
+        `import type { SDKControlInitializeResponse, ModelInfo } from '@gitlawb/openclaude/sdk'`,
+        ``,
+        `const models: ModelInfo[] = [{`,
+        `  value: 'claude-opus-4-6',`,
+        `  displayName: 'Claude Opus 4.6',`,
+        `  description: 'Most capable model',`,
+        `  supportsEffort: true,`,
+        `  supportedEffortLevels: ['low', 'medium', 'high', 'max'],`,
+        `}]`,
+        ``,
+        `const response: SDKControlInitializeResponse = {`,
+        `  commands: [],`,
+        `  agents: [],`,
+        `  output_style: 'default',`,
+        `  available_output_styles: ['default'],`,
+        `  models,`,
+        `  account: { apiProvider: 'openai' },`,
+        `  pid: 1234,`,
+        `}`,
+        ``,
+        `console.log(response)`,
       ].join('\n'),
     )
 
